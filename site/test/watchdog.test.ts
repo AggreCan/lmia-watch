@@ -113,7 +113,7 @@ describe("daily check", () => {
     expect(raw).toContain("From: LMIA Watch <alerts@lmiawatch.ca>\r\nTo: owner@example.com\r\nSubject: LMIA Watch: 2 items need attention");
     expect(raw).toContain("Content-Type: text/plain; charset=utf-8\r\n\r\nDaily check at 2026-10-20T06:00 UTC found:");
     expect(raw).toContain("1. one thing\r\n2. another");
-    expect(raw).toContain("https://github.com/LMIAwatch/lmia-watch/actions");
+    expect(raw).toContain("https://github.com/AggreCan/lmia-watch/actions");
     expect(buildEmail("a@b.ca", "c@d.ca", ["x"], now)).toContain("1 item need attention");
   });
 });

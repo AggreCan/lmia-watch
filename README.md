@@ -62,12 +62,13 @@ one version per ESDC quarter.
 |---|---|
 | All versions (resolves to the newest) | [10.5281/zenodo.23488706](https://doi.org/10.5281/zenodo.23488706) |
 | 2026 Q1 | [10.5281/zenodo.23488707](https://doi.org/10.5281/zenodo.23488707) |
+| 2026 Q2 | [10.5281/zenodo.23826575](https://doi.org/10.5281/zenodo.23826575) |
 
 To cite a figure, use the version you worked from:
 
 > LMIA Watch (2026). *LMIA Watch: ESDC positive and negative LMIA employer
-> lists, derived files* (Version 2026Q1) [Data set]. Zenodo.
-> https://doi.org/10.5281/zenodo.23488707
+> lists, derived files* (Version 2026Q2) [Data set]. Zenodo.
+> https://doi.org/10.5281/zenodo.23826575
 
 Later versions are listed on the record page, and the site's Data page shows
 the citation for the newest one.

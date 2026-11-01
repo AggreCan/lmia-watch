@@ -181,7 +181,7 @@ export function buildEmail(from: string, to: string, alerts: string[], now: Date
       ? ["", "Notices from the last run (information; nothing failed):", "", ...notices.map((n) => `- ${n}`)]
       : []),
     "",
-    "Run log: https://github.com/LMIAwatch/lmia-watch/actions",
+    "Run log: https://github.com/AggreCan/lmia-watch/actions",
     "Site: https://lmiawatch.ca/data",
     "",
     alerts.length
