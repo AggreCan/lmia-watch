@@ -175,8 +175,14 @@ jobs:
         continue-on-error: true
         working-directory: site
         run: npm ci
-      # nightly.py needs nothing beyond the standard library for the gate,
-      # so the pipeline is not installed here.
+      # nightly.py imports the sources, and through them requests, since the
+      # international-candidates stage (2026-10-25), so the gate installs the
+      # pipeline: without it the status check crashed on every retry trigger
+      # and the full refresh ran three times a day whether needed or not.
+      - name: Install the pipeline
+        if: ${{ env.RETRY == 'true' }}
+        continue-on-error: true
+        run: pip install -e ./pipeline
       - name: Read today's run status from R2
         id: decide
         if: ${{ env.RETRY == 'true' }}
