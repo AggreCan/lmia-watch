@@ -108,6 +108,11 @@ export async function respondSubmit(c: Context<AppEnv>): Promise<Response> {
   return thanks(c, "form.thanks_statement", `/employers/${id}`);
 }
 
+// Profiles link /corrections#<id>, one URL for crawlers where the query form
+// gave them one per employer; corrections.js copies the fragment into the
+// hidden employer field. ?employer=<id> still prefills it here, for links and
+// bookmarks made before. Without JavaScript the submit handler matches the
+// record reference the reader types.
 export async function correctionsForm(
   c: Context<AppEnv>, errors: Key[] = [], values: Record<string, string> = {}, status?: number,
 ): Promise<Response> {
@@ -130,6 +135,7 @@ export async function correctionsForm(
         <div class="hp"><label>{t(lang, "form.honeypot")}<input name="website" type="text" tabindex={-1} autocomplete="off" /></label></div>
         <button type="submit" class="btn btn-primary">{t(lang, "form.send_correction")}</button>
       </form>
+      <script src="/corrections.js" defer></script>
     </Layout>,
     status ?? (errors.length ? 400 : 200),
   );

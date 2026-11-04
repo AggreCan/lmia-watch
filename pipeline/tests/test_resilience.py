@@ -1,6 +1,7 @@
 """The resilience layer: the retry gate, the smoke test and rollback record,
-the weekly snapshot restore, the expiry checks, and the attention items and
-issue texts. Every network call goes to a fake session."""
+the weekly snapshot restore, the nightly HTML check and the monthly expiry
+checks, and the attention items and issue texts. Every network call goes to a
+fake session."""
 
 import gzip
 from pathlib import Path
@@ -477,6 +478,8 @@ VERIFY_ACCOUNT = f"{resilience.API}/accounts/{ACCOUNT}/tokens/verify"
 REGISTRAR = f"{resilience.API}/accounts/{ACCOUNT}/registrar/domains/lmiawatch.ca"
 FIRST = date(2026, 11, 1)
 FIRST_NOW = datetime(2026, 11, 1, 0, 55, tzinfo=timezone.utc)
+SITE = "https://lmiawatch.ca"
+HOME = "https://lmiawatch.ca/"
 
 
 class TokenApi(FakeHttp):
@@ -511,8 +514,18 @@ ENV = {"CLOUDFLARE_API_TOKEN": DEPLOY_TOKEN, "CLOUDFLARE_ANALYTICS_TOKEN": ANALY
 
 def test_checks_run_on_the_first_day_of_a_month_only():
     assert resilience.checks_due(FIRST) and not resilience.checks_due(TODAY)
-    # No request at all on another day.
-    assert resilience.run_checks(TODAY, ENV, None, domain="lmiawatch.ca") == {"due": False, "date": "2026-10-22", "items": []}
+    # Another day: the HTML check alone, and no request to the API.
+    api = TokenApi({("", HOME): home_page()})
+    result = resilience.run_checks(TODAY, ENV, api, domain="lmiawatch.ca", site_url=SITE, now=NOW)
+    assert result["due"] is True and result["monthly"] is False and result["date"] == "2026-10-22"
+    assert result["html_rewrite"]["state"] == "ok" and result["items"] == []
+    assert not {"deploy_token", "analytics_token", "domain"} & result.keys()
+    assert [url for url, _ in api.calls] == [HOME]
+    # The first of a month: the HTML check and the three expiry checks.
+    first = resilience.run_checks(FIRST, ENV, TokenApi({("", HOME): home_page()}), domain="lmiawatch.ca", site_url=SITE,
+                                  now=FIRST_NOW)
+    assert first["monthly"] is True
+    assert {"html_rewrite", "deploy_token", "analytics_token", "domain"} <= first.keys()
 
 
 def test_tokens_and_domain_far_from_expiry_are_ok_and_a_missing_permission_is_unknown():
@@ -569,24 +582,112 @@ def test_checks_that_get_no_readable_answer_are_unknown_and_name_no_token():
 
 
 def test_checks_command_writes_its_file_and_logs_no_token(tmp_path, monkeypatch, caplog):
-    api = TokenApi({(DEPLOY_TOKEN, VERIFY_USER): verified(expires="2026-11-10T00:00:00Z")})
+    api = TokenApi({(DEPLOY_TOKEN, VERIFY_USER): verified(expires="2026-11-10T00:00:00Z"), ("", HOME): home_page()})
     monkeypatch.setattr(nightly, "_session", lambda: api)
     for name, value in ENV.items():
         monkeypatch.setenv(name, value)
     out = tmp_path / "checks.json"
     with caplog.at_level(logging.INFO):
-        assert nightly.main(["checks", "--today", "2026-11-01", "--domain", "lmiawatch.ca", "--out", str(out)]) == 0
+        assert nightly.main(["checks", "--today", "2026-11-01", "--domain", "lmiawatch.ca", "--site-url", SITE,
+                             "--out", str(out)]) == 0
     written = json.loads(out.read_text())
-    assert written["due"] is True and written["deploy_token"]["state"] == "expiring" and len(written["items"]) == 1
+    assert written["due"] is True and written["monthly"] is True
+    assert written["deploy_token"]["state"] == "expiring" and len(written["items"]) == 1
+    assert written["html_rewrite"]["state"] == "ok"
     assert DEPLOY_TOKEN not in caplog.text and ANALYTICS_TOKEN not in caplog.text
-    assert nightly.main(["checks", "--today", "2026-11-02", "--out", str(out)]) == 0
-    assert json.loads(out.read_text())["due"] is False
+    # Another day: the HTML check runs, the expiry checks do not; the domain comes from --site-url.
+    api.calls.clear()
+    assert nightly.main(["checks", "--today", "2026-11-02", "--site-url", SITE, "--out", str(out)]) == 0
+    written = json.loads(out.read_text())
+    assert written["due"] is True and written["monthly"] is False and written["html_rewrite"]["state"] == "ok"
+    assert "deploy_token" not in written and [url for url, _ in api.calls] == [HOME]
 
 
 def test_the_domain_comes_from_the_site_address():
     assert resilience.domain_of("https://lmiawatch.ca") == "lmiawatch.ca"
     assert resilience.domain_of("https://lmiawatch.example") == ""
     assert resilience.domain_of("") == ""
+
+
+# -- the nightly HTML check ---------------------------------------------------
+
+BEACON = """<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon="{&quot;token&quot;:&quot;x&quot;}"></script>"""
+INJECTED = """<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v1" data-cf-beacon='{"token": "y"}'></script>"""
+REWRITE_HELP = ("In the dashboard, Web Analytics, lmiawatch.ca, Manage site must be 'Enable with JS Snippet installation', "
+                "and Email Obfuscation, Automatic HTTPS Rewrites and Replace insecure JavaScript must be off.")
+
+
+def home_page(status=200, etag='W/"0123abcd"', beacons=(BEACON,), encoding="gzip", body=None):
+    headers = {"Content-Type": "text/html; charset=UTF-8"}
+    if etag:
+        headers["ETag"] = etag
+    if encoding:
+        headers["Content-Encoding"] = encoding
+    text = body if body is not None else f"<!doctype html><html><head>{''.join(beacons)}</head><body>Data as of 2026-10-21</body></html>"
+    return Resp(status, text, headers=headers)
+
+
+def test_the_html_check_asks_like_a_browser_and_passes_a_page_left_alone():
+    http = FakeHttp({HOME: home_page()})
+    result = resilience.check_html_rewrite(http, SITE, NOW)
+    assert result == {"checked_at": "2026-10-22T00:50:00+00:00", "status": 200, "etag": True, "beacons": 1,
+                      "content_encoding": "gzip", "state": "ok"}
+    [(url, headers)] = http.calls
+    assert url == HOME
+    assert headers["Accept"] == "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    assert headers["User-Agent"].startswith("Mozilla/5.0 (Windows NT 10.0; Win64; x64)") and "Chrome/" in headers["User-Agent"]
+    assert headers["Accept-Encoding"] == "gzip"
+    # A trailing slash on the site address changes nothing; no Content-Encoding reads as null.
+    plain = resilience.check_html_rewrite(FakeHttp({HOME: home_page(encoding=None)}), SITE + "/", NOW)
+    assert plain["state"] == "ok" and plain["content_encoding"] is None
+
+
+def test_a_page_without_its_etag_or_with_a_second_beacon_is_rewritten():
+    cases = [
+        (home_page(etag=None), "no ETag", False, 1),
+        (home_page(beacons=(BEACON, INJECTED)), "2 beacons", True, 2),
+        (home_page(etag=None, beacons=(INJECTED, BEACON)), "no ETag and 2 beacons", False, 2),
+        # The template's beacon gone and the edge's in its place, ETag dropped with it.
+        (home_page(etag=None, beacons=(INJECTED,)), "no ETag", False, 1),
+    ]
+    for resp, wrong, etag, beacons in cases:
+        result = resilience.check_html_rewrite(FakeHttp({HOME: resp}), SITE, NOW)
+        assert result["state"] == "rewritten", wrong
+        assert result["etag"] is etag and result["beacons"] == beacons
+        assert result["item"] == (f"Cloudflare is rewriting the site's HTML again (home page for a browser-like request: "
+                                  f"{wrong}). {REWRITE_HELP}")
+
+
+def test_any_other_answer_is_unknown_and_raises_no_item():
+    cases = [
+        (home_page(status=500, etag=None, beacons=()), "HTTP 500"),
+        (home_page(status=403, etag=None, beacons=(), body="<title>Just a moment...</title>"), "HTTP 403"),
+        (home_page(body="<html><title>Just a moment...</title><div id='cf-chl-widget'></div></html>"),
+         "the edge answered with a challenge"),
+        (ConnectionError("reset"), "request failed (ConnectionError)"),
+        (home_page(beacons=()), "200 with an ETag but no beacon in the page"),
+    ]
+    for answer, detail in cases:
+        result = resilience.check_html_rewrite(FakeHttp({HOME: answer}), SITE, NOW)
+        assert result["state"] == "unknown" and result["detail"] == detail and "item" not in result, detail
+    # No site address (a dev machine without LMIAWATCH_SITE_URL): no request at all.
+    http = FakeHttp({})
+    assert resilience.check_html_rewrite(http, "https://lmiawatch.example", NOW) == {
+        "state": "unknown", "detail": "no site address configured"}
+    assert http.calls == []
+
+
+def test_the_html_item_reaches_the_run_status_without_the_expiry_label():
+    api = TokenApi({("", HOME): home_page(etag=None)})
+    result = resilience.run_checks(TODAY, ENV, api, domain="lmiawatch.ca", site_url=SITE, now=NOW)
+    assert result["html_rewrite"]["state"] == "rewritten" and "item" not in result["html_rewrite"]
+    assert len(result["items"]) == 1 and result["items"][0].startswith("Cloudflare is rewriting")
+    status = {"stages": [], "checks": {**result, "items": result["items"] + [
+        "The domain lmiawatch.ca expires 2026-11-25 (24 days); auto-renew is off"]}}
+    assert resilience.attention_items(status) == [
+        result["items"][0],
+        "Expiry check: The domain lmiawatch.ca expires 2026-11-25 (24 days); auto-renew is off",
+    ]
 
 
 # -- status, attention items and the issue ------------------------------------

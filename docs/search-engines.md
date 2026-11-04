@@ -20,6 +20,11 @@ them adds a cookie or a script to the pages:
    both languages. The nightly run keeps a daily roll-up, Search Console's
    daily figures and a monthly report in R2 (section 6).
 
+The pages do load one measuring script, Cloudflare Web Analytics, placed in
+the page template with the site's public token (section 7, *ETag and 304*).
+Cloudflare states that it sets no cookie, stores nothing in the browser and
+does not fingerprint visitors. The Data page says so in both languages.
+
 Before any of that, two fixes in the zone, both missing on 2026-10-18: plain
 HTTP is served without a redirect, and `www.lmiawatch.ca` serves a full copy
 of the site instead of redirecting to `lmiawatch.ca`. Search engines treat
@@ -663,7 +668,7 @@ name the plain page as their canonical URL:
 | Rules | Kept off | Open |
 |---|---|---|
 | `Disallow: /search?`, `Allow: /search?lang=fr$` | filtered searches and page cursors | `/search`, `/search?lang=fr` |
-| `Disallow: /corrections?`, `Allow: /corrections?lang=fr$` | the correction form opened from a profile (`?employer=<id>`) | `/corrections`, `/corrections?lang=fr` |
+| `Disallow: /corrections?`, `Allow: /corrections?lang=fr$` | the correction form with `?employer=<id>` (how profiles linked it before 2026-11-04) | `/corrections`, `/corrections?lang=fr` |
 | `Disallow: /map?`, `Allow: /map?lang=fr$` | the map opened on a postal area (`?fsa=<FSA>`, each profile's "nearby" link) | `/map`, `/map?lang=fr` |
 
 Google and Bing apply the longest matching rule, so the `Allow` line, anchored
@@ -673,6 +678,13 @@ Claude-SearchBot fetched `/corrections?employer=` 2,599 times, Googlebot
 1,110 times, and crawlers fetched about 1,600 `/map?fsa=` variants. The
 robots test in `site/test/seo.test.ts` checks both groups against these
 paths.
+
+Since 2026-11-04 a profile links `/corrections#<id>`. A fragment never
+reaches the server, so all 168,000 profiles link one URL instead of one
+each, and `site/public/corrections.js` copies the id into the form's hidden
+`employer` field. `?employer=<id>` still fills the field for older links
+and bookmarks, so the rule pair stays. Without JavaScript the form still
+works: the server matches the record reference the reader types.
 
 ### Links from employer pages
 
@@ -759,11 +771,32 @@ Rewrites or Replace insecure JavaScript libraries, so if the tag is missing
 at the edge while the site's tests pass, turn those off in the zone (the
 pages carry no email address to hide).
 
+Found 2026-11-04: Cloudflare Web Analytics ran on its automatic setup, which
+injects the beacon into every HTML response sent to a browser-like request
+(an `Accept` header naming `text/html`, as crawlers send). The rewrite
+dropped the ETag, so search engines received no 304s, while a plain `curl`
+still showed the tag. Add `-H 'Accept: text/html'` to the checks above for
+that reason. The beacon is now in the page template (`site/src/layout.tsx`,
+with the site's public token), and the content security policy in
+`site/src/index.tsx` allows its file and `cloudflareinsights.com`, where it
+reports. The Web Analytics site in the dashboard (Web Analytics,
+lmiawatch.ca, Manage site) must stay on "Enable with JS Snippet
+installation", never the automatic setup. Every night the run fetches the
+home page as a browser would and expects its ETag and exactly one beacon
+(`check_html_rewrite` in `pipeline/lmia_pipeline/resilience.py`); a missing
+ETag or a second beacon is an attention item saying that Cloudflare is
+rewriting the HTML again (`docs/alerts.md`).
+
 ## Sources (read 2026-10-18)
 
 - Cloudflare and ETags (weak ETags kept unless Email Obfuscation, Automatic
   HTTPS Rewrites or Replace insecure JavaScript libraries is on), read
   2026-10-25: `developers.cloudflare.com/cache/reference/etag-headers/`
+- Web Analytics (the automatic setup injects the beacon into proxied HTML;
+  the manual snippet needs
+  `https://static.cloudflareinsights.com/beacon.min.js` in `script-src` and
+  reports to `cloudflareinsights.com`, which `connect-src` must allow), read
+  2026-11-04: `developers.cloudflare.com/web-analytics/faq/`
 
 - IndexNow protocol (the endpoint, the request body, 10,000 URLs a request,
   the key file at the root, the answers 200, 202, 400, 403, 422 and 429),

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { app } from "../src/index";
+import { WEB_ANALYTICS_SRC, WEB_ANALYTICS_TOKEN } from "../src/layout";
 import { DESCRIPTION_MAX } from "../src/seo";
 import { emptyAssets, fakeAssets, testEnv } from "./assets";
 import rankingsYear from "./fixtures/rankings-2026.json";
@@ -205,11 +206,13 @@ describe("every release and ranking page", () => {
     expect(rank).toContain("31,2 %");
   });
 
-  it("runs no inline script: only the theme file and JSON-LD blocks", async () => {
+  it("runs no inline script: only the theme and link files, the Web Analytics beacon and JSON-LD blocks", async () => {
+    const beacon = `<script type="module" src="${WEB_ANALYTICS_SRC}" data-cf-beacon="${JSON.stringify({ token: WEB_ANALYTICS_TOKEN }).replace(/"/g, "&quot;")}">`;
     for (const path of PAGES) {
       const page = await html(path);
       for (const tag of page.match(/<script[^>]*>/g) ?? []) {
-        expect(tag === '<script src="/theme.js">' || tag === '<script src="/links.js" defer="">' || tag === '<script type="application/ld+json">', `${path}: ${tag}`).toBe(true);
+        const allowed = ['<script src="/theme.js">', '<script src="/links.js" defer="">', beacon, '<script type="application/ld+json">'];
+        expect(allowed.includes(tag), `${path}: ${tag}`).toBe(true);
       }
     }
   });

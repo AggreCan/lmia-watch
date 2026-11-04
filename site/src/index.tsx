@@ -7,11 +7,11 @@ import { conditional } from "./conditional";
 import { loadStats } from "./data";
 import type { AppEnv, Env } from "./env";
 import { kofiWebhook } from "./hooks";
-import { throttle } from "./limits";
+import { refuseAutomatedBrowser, throttle } from "./limits";
 import { measure } from "./views";
 import { runWatchdog } from "./watchdog";
 import { langFrom, t, tj } from "./i18n";
-import { Layout, page } from "./layout";
+import { Layout, WEB_ANALYTICS_REPORT, WEB_ANALYTICS_SRC, page } from "./layout";
 import { citePage } from "./pages/cite";
 import { DOWNLOADS, dataPage } from "./pages/data";
 import { employerPage } from "./pages/employer";
@@ -36,20 +36,21 @@ import { llmsTxt, robotsTxt, sitemapFile } from "./seo";
 
 const app = new Hono<AppEnv>();
 
-// The page loads nothing from third parties except the map library and the
-// map tiles, and the policy says exactly that. The library is allowed by its
-// folder on the CDN, not the whole host, so no other script hosted there can
-// run on the site.
+// The page loads nothing from third parties except the map library, the map
+// tiles and the Web Analytics beacon (layout.tsx), and the policy says
+// exactly that. The library is allowed by its folder on the CDN and the
+// beacon by its own file, not the whole host, so no other script hosted
+// there can run on the site. The beacon reports to cloudflareinsights.com.
 const LEAFLET = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/";
 app.use(
   "*",
   secureHeaders({
     contentSecurityPolicy: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", LEAFLET],
+      scriptSrc: ["'self'", LEAFLET, WEB_ANALYTICS_SRC],
       styleSrc: ["'self'", "'unsafe-inline'", LEAFLET],
       imgSrc: ["'self'", "data:", "https://*.tile.openstreetmap.org", "https://tile.openstreetmap.org", LEAFLET],
-      connectSrc: ["'self'"],
+      connectSrc: ["'self'", WEB_ANALYTICS_REPORT],
       fontSrc: ["'self'"],
       objectSrc: ["'none'"],
       frameAncestors: ["'none'"],
@@ -75,6 +76,8 @@ app.use("*", async (c, next) => {
 // After the language middleware so a 429 page still knows its language later.
 app.use("*", throttle);
 app.use("*", measure);
+// Inside measure, so a refused automated browser is counted (limits.ts).
+app.use("*", refuseAutomatedBrowser);
 // Inside measure, so a page answered 304 is counted with that status.
 app.use("*", conditional);
 

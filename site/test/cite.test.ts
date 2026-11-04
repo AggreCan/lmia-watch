@@ -91,6 +91,19 @@ describe("statements on the Data and Support pages", () => {
     expect(fr).toContain("ne conserve aucune adresse IP.");
   });
 
+  it("names Cloudflare Web Analytics as the one measuring script, in both languages", async () => {
+    const en = await get("/data", fakeAssets);
+    expect(en).toContain("The site sets no cookie for these counts and keeps no IP address.");
+    expect(en).toContain("The one measuring script the pages load in the browser is Cloudflare Web Analytics, which records each page view");
+    expect(en).toContain("Cloudflare states that it sets no cookie, stores nothing in the browser and does not fingerprint visitors by their IP address");
+    expect(en).not.toContain("runs no tracking script");
+    const fr = (await get("/data?lang=fr", fakeAssets)).replace(/[  ]/g, " ");
+    expect(fr).toContain("Le site ne dépose aucun témoin pour ces comptes et ne conserve aucune adresse IP.");
+    expect(fr).toContain("Le seul script de mesure que les pages chargent dans le navigateur est Cloudflare Web Analytics, qui enregistre chaque page vue");
+    expect(fr).toContain("Selon Cloudflare, ce script ne dépose aucun témoin, ne conserve rien dans le navigateur et n’établit aucune empreinte numérique des visiteurs");
+    expect(fr).not.toContain("aucun script de suivi");
+  });
+
   it("notes that the Bluesky post is free", async () => {
     expect(await get("/support", fakeAssets)).toContain("The same daily post on Bluesky is free to send");
     expect(await get("/support?lang=fr", fakeAssets)).toContain("La même publication quotidienne sur Bluesky est gratuite");

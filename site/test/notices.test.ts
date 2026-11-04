@@ -274,9 +274,12 @@ describe("the Data page", () => {
     expect(fr).toContain("Droit d’auteur de la Couronne, reproduits selon les");
   });
 
-  it("puts the notices entry after the two entries of October 30, then the two entries of October 25 in their order", () => {
+  it("puts the notices entry after the entry of November 4 and the two of October 30, then the two entries of October 25 in their order", () => {
     const rows = changelog("2026Q1", "en").map((r) => r.change);
-    expect(rows.slice(0, 5)).toEqual(["data.change_directory", "data.change_audience", "data.change_notices", "data.change_intl", "data.change_card_links"]);
+    expect(rows.slice(0, 6)).toEqual([
+      "data.change_privacy_links", "data.change_directory", "data.change_audience", "data.change_notices", "data.change_intl",
+      "data.change_card_links",
+    ]);
   });
 });
 

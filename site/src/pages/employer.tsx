@@ -518,7 +518,8 @@ export async function employerPage(c: Context<AppEnv>): Promise<Response> {
             data-label-full={t(lang, "watch.full", { max: WATCH_MAX })} title={t(lang, "watch.button_title")}
             aria-pressed="false" style="display:none">{t(lang, "watch.watch")}</button>
           <a href={`/employers/${employer.id}/respond`} class="btn">{t(lang, "employer.respond")}</a>
-          <a href={`/corrections?employer=${employer.id}`} class="btn">{t(lang, "employer.correct")}</a>
+          {/* The id rides in the fragment, so every profile links one URL; corrections.js copies it into the form (forms.tsx). */}
+          <a href={`/corrections#${employer.id}`} class="btn">{t(lang, "employer.correct")}</a>
           <a href={REPORT_URL} class="btn btn-active" rel="noopener">{t(lang, "employer.report")}</a>
         </div>
       </section>
@@ -782,7 +783,7 @@ export async function employerPage(c: Context<AppEnv>): Promise<Response> {
           ) : (
             <p class="muted">{t(lang, "employer.no_corrections")}</p>
           )}
-          <a href={`/corrections?employer=${employer.id}`}>{t(lang, "employer.correct")}</a>
+          <a href={`/corrections#${employer.id}`}>{t(lang, "employer.correct")}</a>
         </div>
       </section>
 

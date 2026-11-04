@@ -807,15 +807,19 @@ jobs:
           path: data/raw/cache
           key: raw-cache-${{ github.run_id }}
 
-      # On the first of a month (UTC), whichever run gets there: the status
+      # Every night: the home page fetched as a browser would (an Accept
+      # naming text/html), which must come back with its ETag and exactly one
+      # Web Analytics beacon; a missing ETag or a second beacon means
+      # Cloudflare is rewriting the HTML again and is an attention item. On
+      # the first of a month (UTC), whichever run gets there, also the status
       # and expiry date of the deploy token and of the analytics token (when
       # set), through the API's token verify call, and the domain's
       # registration (expiry date, auto-renew) through the registrar API. A
       # date inside 30 days, or a token that is not active, is an attention
       # item; an answer the token has no permission for, or no answer, is
-      # "unknown" and nothing more. Every other day it writes "not due". The
-      # results go to the run status as checks; no token is ever printed.
-      - name: Monthly expiry checks (the first of a month)
+      # "unknown" and nothing more. The results go to the run status as
+      # checks; no token is ever printed.
+      - name: Nightly HTML check and monthly expiry checks
         id: checks
         if: ${{ !cancelled() }}
         continue-on-error: true
@@ -824,7 +828,8 @@ jobs:
           CLOUDFLARE_ANALYTICS_TOKEN: ${{ secrets.CLOUDFLARE_ANALYTICS_TOKEN }}
         run: |
           mkdir -p data/out
-          python -m lmia_pipeline.nightly checks --today "$(date -u +%Y-%m-%d)" --out data/out/checks.json
+          python -m lmia_pipeline.nightly checks --today "$(date -u +%Y-%m-%d)" \
+            --site-url "${LMIAWATCH_SITE_URL:-https://lmiawatch.ca}" --out data/out/checks.json
 
       # What the daily check in the Worker and the next retry's gate read: when
       # the run finished, which stages and steps succeeded (every step's
@@ -836,8 +841,8 @@ jobs:
       # post, the Bluesky post, the Zenodo deposit, the search database sync,
       # the audience roll-up, the Search Console import, the monthly report
       # and the IndexNow submission, where the database
-      # came from (restore), the smoke test and any rollback, and the expiry
-      # checks. Written whatever happened above. The Bluesky, Zenodo,
+      # came from (restore), the smoke test and any rollback, and the HTML
+      # and expiry checks. Written whatever happened above. The Bluesky, Zenodo,
       # search-sync, roll-up, Search Console, report, IndexNow and rollback
       # steps write "failed" before they start, so a step stopped by its time
       # limit still reads as failed.

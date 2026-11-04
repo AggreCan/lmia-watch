@@ -704,10 +704,11 @@ def main(argv: list[str] | None = None) -> int:
     sm.add_argument("--out", required=True)
     sm.add_argument("--settle", type=float, default=resilience.SMOKE_SETTLE_S,
                     help="seconds to wait before the first request")
-    ck = sub.add_parser("checks", help="the monthly expiry checks (the first day of a month, UTC)")
+    ck = sub.add_parser("checks", help="the nightly HTML check, plus the expiry checks on the first day of a month (UTC)")
     ck.add_argument("--today", required=True, help="today's UTC date, YYYY-MM-DD")
-    ck.add_argument("--domain", default=resilience.domain_of(config.SITE_URL),
-                    help="the domain whose registrar record is read (default: the site's host)")
+    ck.add_argument("--site-url", default=config.SITE_URL, help="the live site, whose home page the HTML check reads")
+    ck.add_argument("--domain", default=None,
+                    help="the domain whose registrar record is read (default: the host of --site-url)")
     ck.add_argument("--out", required=True)
     bc = sub.add_parser("site-bundle-check", help="prove an unpacked static.tar.gz is what the live site serves")
     bc.add_argument("--bundle", required=True, help="the unpacked archive's static folder (stats.json at its top)")
@@ -842,18 +843,19 @@ def _smoke(args: argparse.Namespace) -> int:
 
 def _checks(args: argparse.Namespace) -> int:
     today = date.fromisoformat(args.today)
-    http = _session() if resilience.checks_due(today) else None
+    domain = args.domain if args.domain is not None else resilience.domain_of(args.site_url)
+    http = _session()
     try:
-        result = resilience.run_checks(today, os.environ, http, domain=args.domain)
+        result = resilience.run_checks(today, os.environ, http, domain=domain, site_url=args.site_url)
     finally:
-        if http is not None:
-            http.close()
+        http.close()
     _write_json(Path(args.out), result)
-    if not result["due"]:
-        log.info("checks: not due (they run on the first day of a month)")
-        return 0
-    for name in ("deploy_token", "analytics_token", "domain"):
-        entry = result.get(name) or {}
+    if not result["monthly"]:
+        log.info("checks: the expiry checks are not due (they run on the first day of a month)")
+    for name in ("html_rewrite", "deploy_token", "analytics_token", "domain"):
+        if name not in result:
+            continue
+        entry = result[name] or {}
         log.info("checks: %s: %s%s", name, entry.get("state"), f" ({entry['detail']})" if entry.get("detail") else "")
     for item in result["items"]:
         log.warning("checks: %s", item)

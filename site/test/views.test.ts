@@ -235,6 +235,18 @@ describe("bot or human", () => {
     expect(points[1].blobs?.[9]).toMatch(/^[0-9a-f]{16}$/);
   });
 
+  it("records a refused automated browser as a bot with status 403, like the response form's refusals", async () => {
+    const { points, dataset } = recorder();
+    const env = { ...testEnv(), VIEWS: dataset, VIEWS_SALT_KEY: "test-secret" };
+    const headers = { "cf-connecting-ip": IP, "user-agent": "Lightpanda/1.0", ...NAVIGATE };
+    expect((await app.request("/employers/emp-a000000001", { headers }, env)).status).toBe(403);
+    expect((await app.request("/?lang=fr", { headers }, env)).status).toBe(403);
+    expect(points).toEqual([
+      { indexes: ["/employers/:id"], blobs: ["/employers/:id", "page", "en", "", "", "GET", "", "bot", "", ""], doubles: [403] },
+      { indexes: ["/"], blobs: ["/", "page", "fr", "", "", "GET", "", "bot", "", ""], doubles: [403] },
+    ]);
+  });
+
   it("records the edge's verified-bot category as a bot on the data point", async () => {
     const { points, dataset } = recorder();
     const req = new Request("http://localhost/search", { headers: { "user-agent": CHROME } });

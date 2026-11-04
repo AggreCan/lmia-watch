@@ -123,6 +123,16 @@ allowed to make reads `unknown` and raises nothing: the deploy token has no
 registrar permission, so the domain check reads `unknown` until that token is
 also given read access to the account's registrar domains.
 
+**HTML check.** Every night the same step fetches the home page as a browser
+would (an `Accept` header naming `text/html`, a browser's user agent) and
+expects a 200 with the page's ETag and exactly one Web Analytics beacon. A
+missing ETag or a second beacon means Cloudflare is rewriting the site's HTML
+again, which costs the 304s crawlers rely on (`docs/search-engines.md`,
+section 7), and is an attention item. Any other answer (another status, a
+challenge, no answer) reads `unknown` and raises nothing; the smoke test
+reports a site that does not answer. The result is under `checks.html_rewrite`
+in the run status, with `etag`, `beacons` and `content_encoding`.
+
 ## What each item means
 
 | Item | Likely cause | What to do |
@@ -145,3 +155,4 @@ also given read access to the account's registrar domains.
 | Restored from the weekly snapshot | Both nightly backups were missing or damaged | Find out what removed or damaged them; nothing to restore by hand |
 | Expiry check: a token expires or is not active | The token was made with an end date, or was disabled | Make a new token with the same permissions and replace the repository secret |
 | Expiry check: the domain expires | The registration is close to its end | Check auto-renew and the payment method in the dashboard's Registrar section |
+| Cloudflare is rewriting the site's HTML again | The Web Analytics site was switched to its automatic setup, or Email Obfuscation, Automatic HTTPS Rewrites or Replace insecure JavaScript was turned on | Web Analytics, lmiawatch.ca, Manage site: "Enable with JS Snippet installation"; turn the three zone features off. Check with `curl -sI -H 'Accept: text/html' https://lmiawatch.ca/`, which must show an `etag` |

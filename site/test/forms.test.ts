@@ -1,6 +1,8 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { EMPLOYER_ID_RE } from "../src/data";
 import { app } from "../src/index";
+import correctionsJs from "../public/corrections.js?raw";
 import { testEnv } from "./assets";
 
 // Each post comes from its own address, so the per-address form cap (5 a minute) never trips here.
@@ -172,5 +174,51 @@ describe("the response form opens in a browser only", () => {
     const res = await app.request("/corrections", { headers: { "user-agent": "curl/8.5.0" } }, testEnv());
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("<form");
+  });
+});
+
+// Profiles link /corrections#<id>; public/corrections.js copies the fragment
+// into the hidden employer field. ?employer=<id> keeps working for old links.
+describe("the corrections form opened from a profile", () => {
+  const IP = { "cf-connecting-ip": "198.51.100.170" };
+  const page = async (path: string) => {
+    const res = await app.request(path, { headers: IP }, testEnv());
+    expect(res.status, path).toBe(200);
+    return res.text();
+  };
+  const hidden = (html: string) => html.match(/<input type="hidden" name="employer" value="([^"]*)"\s*\/?>/)?.[1];
+
+  it("prefills the employer from ?employer= and leaves it empty without", async () => {
+    expect(hidden(await page("/corrections?employer=emp-a000000001"))).toBe("emp-a000000001");
+    expect(hidden(await page("/corrections?lang=fr&employer=emp-a000000002"))).toBe("emp-a000000002");
+    expect(hidden(await page("/corrections"))).toBe("");
+  });
+
+  it("loads corrections.js on the form only", async () => {
+    const tag = '<script src="/corrections.js" defer=""></script>';
+    const form = await page("/corrections");
+    expect(form.split(tag).length - 1).toBe(1);
+    // After the form, so the field exists when the script runs.
+    expect(form.indexOf(tag)).toBeGreaterThan(form.indexOf("</form>"));
+    expect(await page("/")).not.toContain("corrections.js");
+    expect(await page("/employers/emp-a000000001")).not.toContain("corrections.js");
+  });
+
+  it("serves corrections.js from public/ as JavaScript", async () => {
+    const res = await env.ASSETS.fetch(new Request("https://assets.invalid/corrections.js"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/javascript/);
+    expect(await res.text()).toBe(correctionsJs);
+  });
+
+  it("checks the fragment against the employer id shape and fills the field the page renders", async () => {
+    // The script mirrors EMPLOYER_ID_RE rather than importing it.
+    expect(correctionsJs.match(/var EMPLOYER_ID_RE = (\/[^\n]+\/);/)?.[1]).toBe(String(EMPLOYER_ID_RE));
+    expect(correctionsJs).toContain(`document.querySelector('form[action="/corrections"] input[name="employer"]')`);
+    expect(correctionsJs).toContain("location.hash.slice(1)");
+    const form = await page("/corrections");
+    expect(form).toMatch(/<form method="post" action="\/corrections" class="stack">[\s\S]*<input type="hidden" name="employer" value=""/);
+    // An inline script would break the content security policy; the file is the only script it adds.
+    for (const tag of form.match(/<script\b[^>]*>/g) ?? []) expect(/\bsrc="|type="application\/(?:ld\+)?json"/.test(tag), tag).toBe(true);
   });
 });

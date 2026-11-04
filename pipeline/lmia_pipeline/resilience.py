@@ -13,7 +13,9 @@ nightly.py calls these from its command line; the workflow calls nightly.py.
                 static.tar.gz with the ones the live site serves.
   R2Rest        list the bucket and download one object through Cloudflare's
                 REST API, for the weekly snapshot the restore falls back to.
-  run_checks    once a month, the expiry dates of the tokens and the domain.
+  run_checks    every night, that Cloudflare leaves the site's HTML as the
+                Worker sent it; on the first of a month also the expiry
+                dates of the tokens and the domain.
   attention_items, issue_texts
                 the items the run's last step reports, and the text of the
                 GitHub issue it opens, updates or closes.
@@ -597,7 +599,7 @@ def r2_from_env(bucket: str | None = None) -> R2Rest | None:
     return R2Rest(requests.Session(), account, token, bucket or (os.environ.get("BUCKET") or "").strip() or DATA_BUCKET)
 
 
-# -- monthly expiry checks ----------------------------------------------------
+# -- nightly and monthly checks -----------------------------------------------
 
 EXPIRY_WARN_DAYS = 30
 CHECK_TIMEOUT_S = 30.0
@@ -702,24 +704,98 @@ def domain_of(site_url: str) -> str:
     return "" if not host or host.endswith(".example") else host
 
 
-def run_checks(today: date, env: Mapping[str, str], http: Any, *, domain: str, now: datetime | None = None) -> dict[str, Any]:
-    """The month's expiry checks, or {"due": False} on any other day. Never raises."""
-    if not checks_due(today):
-        return {"due": False, "date": today.isoformat(), "items": []}
+# Cloudflare rewrites an HTML page on its way to a browser-like request when
+# a zone feature injects into it. Web Analytics' automatic setup did, and the
+# rewrite dropped the ETag the Worker sets (site/src/conditional.ts), so
+# crawlers got no 304s. The beacon now sits in the page template and the Web
+# Analytics site is on the manual snippet setting; a switch back, or Email
+# Obfuscation, Automatic HTTPS Rewrites or Replace insecure JavaScript turned
+# on, shows here as a home page without its ETag or with a second beacon. The
+# request looks like a browser's (an Accept naming text/html), because the
+# edge rewrites only those.
+HTML_CHECK_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+HTML_CHECK_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/130.0.0.0 Safari/537.36")
+BEACON_MARK = "data-cf-beacon"
+REWRITE_ITEM_START = "Cloudflare is rewriting the site's HTML again"
+
+
+def check_html_rewrite(http: Any, site_url: str, now: datetime) -> dict[str, Any]:
+    """The home page as a browser receives it. "ok": 200 with an ETag and
+    exactly one Web Analytics beacon. "rewritten", with an item: the ETag is
+    gone or the beacon appears more than once. "unknown", no item: any other
+    answer, a challenge, or no answer (an unreachable site is the smoke test's
+    to report). Never raises."""
+    host = domain_of(site_url)
+    if not host:
+        return {"state": "unknown", "detail": "no site address configured"}
+    out: dict[str, Any] = {"checked_at": now.isoformat(timespec="seconds")}
+    url = site_url.rstrip("/") + "/"
+    try:
+        resp = http.get(url, headers={"Accept": HTML_CHECK_ACCEPT, "User-Agent": HTML_CHECK_AGENT,
+                                      "Accept-Encoding": "gzip"}, timeout=CHECK_TIMEOUT_S)
+    except Exception as exc:
+        out.update(state="unknown", detail=f"request failed ({type(exc).__name__})")
+        return out
+    status = _status_code(resp)
+    try:
+        headers = {str(k).lower(): str(v) for k, v in (getattr(resp, "headers", None) or {}).items()}
+    except Exception:
+        headers = {}
+    try:
+        body = str(resp.text)[:MAX_BODY]
+    except Exception:
+        body = ""
+    out.update(status=status, etag="etag" in headers, beacons=body.count(BEACON_MARK),
+               content_encoding=headers.get("content-encoding"))
+    if status != 200:
+        out.update(state="unknown", detail=f"HTTP {status}")
+        return out
+    if _challenge(resp, body):
+        out.update(state="unknown", detail="the edge answered with a challenge")
+        return out
+    wrong = []
+    if not out["etag"]:
+        wrong.append("no ETag")
+    if out["beacons"] > 1:
+        wrong.append(f"{out['beacons']} beacons")
+    if wrong:
+        out.update(state="rewritten", item=(
+            f"{REWRITE_ITEM_START} (home page for a browser-like request: {' and '.join(wrong)}). "
+            f"In the dashboard, Web Analytics, {host}, Manage site must be 'Enable with JS Snippet installation', "
+            f"and Email Obfuscation, Automatic HTTPS Rewrites and Replace insecure JavaScript must be off."))
+    elif out["beacons"] == 0:
+        # Not the edge: the template lost its beacon. The site's tests catch that.
+        out.update(state="unknown", detail="200 with an ETag but no beacon in the page")
+    else:
+        out["state"] = "ok"
+    return out
+
+
+def run_checks(today: date, env: Mapping[str, str], http: Any, *, domain: str, site_url: str = "",
+               now: datetime | None = None) -> dict[str, Any]:
+    """Tonight's checks: the HTML check every night and, on the first of a
+    month (monthly: true), the expiry checks of the two tokens and the
+    domain. Never raises."""
     current = now or datetime.now(timezone.utc)
-    deploy = (env.get("CLOUDFLARE_API_TOKEN") or "").strip()
-    analytics = (env.get("CLOUDFLARE_ANALYTICS_TOKEN") or "").strip()
-    account = (env.get("CLOUDFLARE_ACCOUNT_ID") or "").strip()
-    out: dict[str, Any] = {"due": True, "date": today.isoformat()}
+    monthly = checks_due(today)
+    out: dict[str, Any] = {"due": True, "monthly": monthly, "date": today.isoformat()}
     jobs: list[tuple[str, Callable[[], dict[str, Any]]]] = [
-        ("deploy_token", lambda: verify_token(http, deploy, account, current, "deploy token (CLOUDFLARE_API_TOKEN)")
-         if deploy else {"state": "not set"}),
-        ("analytics_token", lambda: verify_token(http, analytics, account, current,
-                                                 "analytics token (CLOUDFLARE_ANALYTICS_TOKEN)")
-         if analytics else {"state": "not set"}),
-        ("domain", lambda: domain_record(http, deploy, account, domain, current) if deploy
-         else {"state": "unknown", "detail": "no token"}),
+        ("html_rewrite", lambda: check_html_rewrite(http, site_url, current)),
     ]
+    if monthly:
+        deploy = (env.get("CLOUDFLARE_API_TOKEN") or "").strip()
+        analytics = (env.get("CLOUDFLARE_ANALYTICS_TOKEN") or "").strip()
+        account = (env.get("CLOUDFLARE_ACCOUNT_ID") or "").strip()
+        jobs += [
+            ("deploy_token", lambda: verify_token(http, deploy, account, current, "deploy token (CLOUDFLARE_API_TOKEN)")
+             if deploy else {"state": "not set"}),
+            ("analytics_token", lambda: verify_token(http, analytics, account, current,
+                                                     "analytics token (CLOUDFLARE_ANALYTICS_TOKEN)")
+             if analytics else {"state": "not set"}),
+            ("domain", lambda: domain_record(http, deploy, account, domain, current) if deploy
+             else {"state": "unknown", "detail": "no token"}),
+        ]
     for name, job in jobs:
         try:
             out[name] = job()
@@ -780,7 +856,9 @@ def attention_items(status: Any) -> list[str]:
                      f"so the Job Bank observations since that snapshot are lost")
     checks = status.get("checks")
     if isinstance(checks, dict):
-        items.extend(f"Expiry check: {i}" for i in checks.get("items") or [] if isinstance(i, str))
+        # The HTML check's item names itself; the others come from the monthly expiry checks.
+        items.extend(i if i.startswith(REWRITE_ITEM_START) else f"Expiry check: {i}"
+                     for i in checks.get("items") or [] if isinstance(i, str))
     # A designated-employer list loaded by hand whose publisher has a newer
     # edition: someone has to load it by hand, so it is an item, not a notice.
     registers = status.get("registers")

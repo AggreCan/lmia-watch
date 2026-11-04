@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { cityPath, placeKey } from "../src/crosslinks";
 import { app } from "../src/index";
+import { WEB_ANALYTICS_SRC, WEB_ANALYTICS_TOKEN } from "../src/layout";
 import { contentEtag, emptyAssets, fakeAssets, testEnv } from "./assets";
 import occIndex from "./fixtures/occupations-index.json";
 import placeBc from "./fixtures/place-bc.json";
@@ -353,6 +354,15 @@ describe("pages", () => {
     const res = await get("/");
     expect(res.headers.get("content-security-policy")).toContain("default-src 'self'");
     expect(res.headers.get("content-security-policy")).toContain("cdnjs.cloudflare.com");
+    // The Web Analytics beacon: its one file may run, and it may report to its host.
+    const csp = Object.fromEntries(
+      (res.headers.get("content-security-policy") ?? "").split(";").map((d) => {
+        const [name, ...values] = d.trim().split(/\s+/);
+        return [name, values];
+      }),
+    );
+    expect(csp["script-src"]).toEqual(["'self'", "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/", WEB_ANALYTICS_SRC]);
+    expect(csp["connect-src"]).toEqual(["'self'", "https://cloudflareinsights.com"]);
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("x-frame-options")).toBe("DENY");
     expect(res.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
@@ -498,5 +508,66 @@ describe("employer page links to place and occupation pages", () => {
     expect(await cityPath(after, "XX", "Penticton")).toBeNull();
     expect(await cityPath(after, "ZZ", "Penticton")).toBeNull();
     expect(await cityPath(after, "BC", null)).toBeNull();
+  });
+});
+
+// Cloudflare Web Analytics, rendered in the layout so the edge never rewrites
+// the HTML. The attribute is read back the way a browser reads it: entities
+// decoded, then the JSON parsed.
+describe("the Web Analytics beacon", () => {
+  const IP = { "cf-connecting-ip": "198.51.100.160" };
+  const BEACON = /<script type="module" src="([^"]*)" data-cf-beacon="([^"]*)"><\/script>/g;
+  const decodeAttr = (s: string) => s.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+
+  it("is in the head of every HTML page once, with the site's token", async () => {
+    const pages: [string, number][] = [
+      ["/", 200],
+      ["/?lang=fr", 200],
+      ["/employers/emp-a000000001", 200],
+      ["/corrections", 200],
+      ["/methodology", 200],
+      ["/nothing-here", 404],
+      ["/employers/emp-ffffffffff", 404],
+    ];
+    for (const [path, status] of pages) {
+      const res = await get(path, IP);
+      expect(res.status, path).toBe(status);
+      const html = await res.text();
+      const tags = [...html.matchAll(BEACON)];
+      expect(tags, path).toHaveLength(1);
+      expect(html.split("cloudflareinsights").length - 1, path).toBe(1);
+      const [tag, src, beacon] = tags[0];
+      expect(src, path).toBe(WEB_ANALYTICS_SRC);
+      expect(JSON.parse(decodeAttr(beacon)), path).toEqual({ token: WEB_ANALYTICS_TOKEN });
+      const head = html.slice(0, html.indexOf("</head>"));
+      expect(head.indexOf(tag), path).toBeGreaterThan(head.indexOf('<script src="/links.js" defer=""></script>'));
+    }
+    const missing = await (await app.request("/", { headers: IP }, testEnv(emptyAssets))).text();
+    expect([...missing.matchAll(BEACON)]).toHaveLength(1);
+    expect(WEB_ANALYTICS_TOKEN).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it("is not in the JSON API, the sitemaps or the feeds", async () => {
+    for (const path of ["/api/stats", "/api/employers/emp-a000000001", "/sitemap.xml"]) {
+      const res = await get(path, IP);
+      expect(res.status, path).toBe(200);
+      expect(await res.text(), path).not.toContain("cloudflareinsights");
+    }
+    const FEED = '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Pending</title></feed>';
+    const feedAssets = {
+      fetch: async () => new Response(FEED, { headers: { "content-type": "application/atom+xml" } }),
+    } as unknown as Fetcher;
+    const feed = await app.request("/data/feeds/canada/pending.xml", { headers: IP }, testEnv(feedAssets));
+    expect(feed.status).toBe(200);
+    expect(await feed.text()).toBe(FEED);
+  });
+});
+
+describe("the correction link on a profile", () => {
+  it("names the employer in the fragment, so every profile links one URL", async () => {
+    const html = await (await get("/employers/emp-a000000001", { "cf-connecting-ip": "198.51.100.161" })).text();
+    expect(html.split('href="/corrections#emp-a000000001"').length - 1).toBe(2);
+    expect(html).not.toContain("/corrections?employer=");
+    expect(html).not.toContain("/corrections?");
   });
 });

@@ -65,6 +65,15 @@ the Worker, so they count toward the daily total; their job is to protect the
 database and the downloads from a single address, not to replace the edge
 rule.
 
+The Lightpanda headless browser (a user agent starting `Lightpanda/`) gets a
+403 in plain text pointing at `/downloads/` and `/llms.txt` on every path
+except the downloads, `/llms.txt`, `/robots.txt`, the sitemaps and the feeds
+(`refuseAutomatedBrowser` in `site/src/limits.ts`, counted as a bot response
+with status 403). One operator fetched about 32,000 pages a day with it
+through proxy address ranges, ignoring robots.txt, and a refusal costs under
+a millisecond of CPU against about seven for a rendered page. The agent
+string is a launch flag, so this only slows that operator down.
+
 ## 3. Emergency switch
 
 Security, Settings, Under Attack Mode challenges every visitor at the edge

@@ -10,6 +10,18 @@ import {
 // The formatting helpers live with the dictionary; pages import them from here.
 export { fmtInt, fmtWage, periodLabel } from "./i18n";
 
+// Cloudflare Web Analytics. The token is the site's public Web Analytics
+// token: it is in every page's HTML and is not a secret. The snippet is
+// rendered here, rather than injected by Cloudflare's automatic setup, so the
+// edge never rewrites the HTML: the rewrite drops the ETag (conditional.ts).
+// The Web Analytics site must stay on "Enable with JS Snippet installation";
+// the nightly run checks that the edge leaves the home page's ETag and single
+// beacon alone (pipeline/lmia_pipeline/resilience.py). The content security
+// policy in index.tsx allows the script file and the host it reports to.
+export const WEB_ANALYTICS_TOKEN = "ec72fdd415ae482690ab959217ebafe3";
+export const WEB_ANALYTICS_SRC = "https://static.cloudflareinsights.com/beacon.min.js";
+export const WEB_ANALYTICS_REPORT = "https://cloudflareinsights.com";
+
 export const STATUS_LABEL: Record<string, Key> = {
   pending: "status.pending",
   approved: "status.approved",
@@ -183,6 +195,7 @@ export const Layout: FC<
         <link rel="stylesheet" href="/styles.css?v=23" />
         <script src="/theme.js"></script>
         <script src="/links.js" defer></script>
+        <script type="module" src={WEB_ANALYTICS_SRC} data-cf-beacon={JSON.stringify({ token: WEB_ANALYTICS_TOKEN })}></script>
         <link rel="preload" href="/fonts/public-sans-latin-var.woff2" as="font" type="font/woff2" crossorigin="anonymous" />
         <link rel="icon" href="/favicon.ico" sizes="48x48" />
         <link rel="icon" href="/favicon.svg" type="image/svg+xml" />

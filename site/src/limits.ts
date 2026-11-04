@@ -1,6 +1,7 @@
 import type { Context, Next } from "hono";
 import type { AppEnv, Env } from "./env";
 import { t } from "./i18n";
+import { absoluteUrl } from "./seo";
 
 // Which cap a request falls under. The API and the downloads get their own
 // because a script can hammer them without ever looking like a visitor; form
@@ -48,4 +49,37 @@ export async function throttle(c: Context<AppEnv>, next: Next): Promise<Response
     return c.json({ error: t(lang, "limits.too_many_api") }, 429);
   }
   return c.text(t(lang, "limits.too_many"), 429);
+}
+
+// The Lightpanda headless browser names itself "Lightpanda/1.0" (a launch
+// flag can append a suffix, hence the prefix match). One operator fetched
+// about 32,000 pages a day with it through proxy address ranges, ignoring
+// robots.txt. A refusal costs under a millisecond of CPU against about seven
+// for a rendered page. The agent string is the operator's to change with a
+// launch flag, so this only slows them down; the per-address caps above and
+// the edge rules stay the brakes. The routes made for machines stay open, so
+// a polite tool still gets the data: the downloads, llms.txt, robots.txt, the
+// sitemaps and the Atom feeds. Registered inside the measure middleware
+// (index.tsx), so each refusal is counted as a 403 from a bot.
+const REFUSED_AGENT = "Lightpanda/";
+
+export function machineRoute(path: string): boolean {
+  return (
+    path.startsWith("/downloads/") ||
+    path.startsWith("/data/feeds/") ||
+    path === "/llms.txt" ||
+    path === "/robots.txt" ||
+    /^\/sitemap(?:-[0-9]+)?\.xml$/.test(path)
+  );
+}
+
+export async function refuseAutomatedBrowser(c: Context<AppEnv>, next: Next): Promise<Response | void> {
+  if (!(c.req.header("user-agent") ?? "").startsWith(REFUSED_AGENT) || machineRoute(c.req.path)) return next();
+  c.header("Cache-Control", "private, no-store");
+  const text = t(c.get("lang") ?? "en", "limits.automated_browser", {
+    downloads: absoluteUrl("/downloads/"),
+    example: absoluteUrl("/downloads/employers.csv"),
+    llms: absoluteUrl("/llms.txt"),
+  });
+  return c.text(text, 403);
 }
