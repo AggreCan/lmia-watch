@@ -6,6 +6,25 @@ XLSX with a title row and footnotes from 2020 Q4 on. Headers are matched by
 keyword rather than exact text, and the file type comes from the URL because
 the CKAN format field is wrong on some rows. The 2016 to 2019 Q2 files print a
 group's shared cells once (see read_records).
+
+Reading the portal: each night the stage asks CKAN for both listings and
+fetches each English file (a cached copy serves for a week, then is
+revalidated). A listing or file that times out, cannot connect or answers
+5xx or 429, and a listing that is not the expected JSON (a maintenance page
+served with HTTP 200), is portal trouble. So is the client's circuit breaker
+tripping (AbortRun, once several requests in a row have failed, here or in
+reload_outdated): the stage then sends no further ESDC request that night,
+counts the trouble against the list it was reading, and leaves a list it
+never reached as it was ("not read" in the detail line, no count change and
+no notice of its own). ESDC publishes a new quarter a few times a year, so a
+night without the listing changes nothing and the quarters already loaded
+stand: portal trouble is a notice, and the stage stays ok, until a list has
+had it on PORTAL_MISS_NIGHTS nights in a row, when it becomes a failed
+stage, since a portal that stays unreadable needs someone. Nights are
+counted per list in meta, once per UTC date (a retry the same day adds
+none), and a night without portal trouble for the list sets its count back
+to 0. A refusal (404, 403, 400), a listing with no English resources and a
+file that does not parse fail the stage the first night, as before.
 """
 
 from __future__ import annotations
@@ -23,9 +42,9 @@ from collections.abc import Iterable, Iterator, Mapping
 import openpyxl
 
 from .. import config
-from ..db import log_run, now_iso, upsert_employer
+from ..db import get_meta, log_run, now_iso, set_meta, upsert_employer
 from ..household import is_household_row, remove_household_rows
-from ..http import FetchError, PoliteClient
+from ..http import AbortRun, FetchError, PoliteClient
 from ..normalize import (
     NORMALIZE_VERSION, iso_date, norm_name, parse_address, parse_noc, period_from_text, province_code, to_int,
 )
@@ -39,6 +58,12 @@ log = logging.getLogger(__name__)
 # rows, the stream and province carried down their blocks, and data rows no
 # longer taken for headers.
 PARSER_VERSION = 1
+
+# Portal trouble (see the module docstring) on this many nights in a row for
+# one list turns from a notice into a failed stage.
+PORTAL_MISS_NIGHTS = 3
+# The run status splits a log row's notice into one notice per part (nightly._notices).
+NOTICE_SEP = " | "
 
 # Order matters: a header such as "Approved LMIA Positions" must land on
 # positions, so positions is tested before lmias.
@@ -534,11 +559,17 @@ def reload_outdated(conn: sqlite3.Connection, client: PoliteClient, *, now: str 
     loaded) and is downloaded only when the cache lacks it. A resource whose
     file cannot be had keeps its rows and its old version and is tried again
     on the next run; once every resource carries PARSER_VERSION this finds
-    nothing. Returns the resources reloaded, the rows they gained, and any
-    failures and duplicate files.
+    nothing. Returns the resources reloaded, the rows they gained, any
+    failures and duplicate files, and under misses each file the portal did
+    not serve (a transient failure or the circuit breaker's trip) as (list,
+    file name, reason): portal trouble, which run() counts with the rest,
+    since the file is tried again next run and nothing is lost meanwhile. A
+    refusal (404, 403) is a failure. When the breaker trips, reloading stops
+    and aborted holds the reason, so run() asks the portal for nothing more
+    that night; else aborted is None.
     """
     stamp = now or now_iso()
-    out: dict = {"resources": 0, "rows": 0, "failures": [], "duplicates": []}
+    out: dict = {"resources": 0, "rows": 0, "failures": [], "duplicates": [], "misses": [], "aborted": None}
     outdated = conn.execute(
         "SELECT resource_id, dataset, period, name, url, published FROM esdc_resources "
         "WHERE parser_version < ? ORDER BY dataset, period, resource_id",
@@ -549,8 +580,17 @@ def reload_outdated(conn: sqlite3.Connection, client: PoliteClient, *, now: str 
         label = f"{r['period']} {r['dataset']}"
         try:
             data = client.get(r["url"], cache=True, max_age_s=float("inf"))
+        except AbortRun as exc:
+            log.warning("esdc: the portal stopped answering during the reload of %s; no more ESDC requests "
+                        "tonight: %s", label, exc)
+            out["aborted"] = abort_reason(exc)
+            out["misses"].append((r["dataset"], r["name"] or label, out["aborted"]))
+            break
         except FetchError as exc:
-            out["failures"].append(f"reload {label}: {exc}")
+            if exc.transient:
+                out["misses"].append((r["dataset"], r["name"] or label, short_reason(exc)))
+            else:
+                out["failures"].append(f"reload {label}: {exc}")
             continue
         try:
             out["rows"] += load_resource(conn, r["dataset"], res, data, now=stamp)
@@ -567,11 +607,71 @@ def reload_outdated(conn: sqlite3.Connection, client: PoliteClient, *, now: str 
     return out
 
 
+def short_reason(exc: FetchError) -> str:
+    """A failed request in a few words, for a notice: the HTTP status, else the
+    exception class the client recorded (ConnectTimeout, ReadTimeout,
+    ConnectionError), else the start of the message. The message itself names
+    the URL and the repr and runs to hundreds of characters."""
+    if exc.status is not None:
+        return f"HTTP {exc.status}"
+    text = str(exc)
+    # "<url>: ConnectTimeout(MaxRetryError(...)) after 4 attempts"; a URL holds no ": ".
+    match = re.search(r"(?:^|: )([A-Za-z_]\w*)\(", text)
+    return match.group(1) if match else text[:60]
+
+
+def abort_reason(exc: AbortRun) -> str:
+    """The circuit breaker's trip in a few words, with the count of failed
+    requests taken from its message ("5 requests failed in a row; last ...")."""
+    match = re.search(r"(\d+) requests (?:failed )?in a row", str(exc))
+    if not match:
+        return "the portal stopped answering"
+    n = int(match.group(1))
+    return f"the portal stopped answering after {n} failed request{'s' if n != 1 else ''} in a row"
+
+
+def _portal_keys(list_name: str) -> tuple[str, str, str]:
+    """The meta keys for one list: consecutive nights with portal trouble, the
+    UTC date of the last night counted, and the stamp of the last listing read."""
+    return (f"esdc_portal_misses_{list_name}", f"esdc_portal_miss_date_{list_name}",
+            f"esdc_listing_read_at_{list_name}")
+
+
+def portal_night(conn: sqlite3.Connection, list_name: str, *, missed: bool, read: bool, stamp: str) -> int:
+    """Record tonight for one list and return its consecutive nights with portal
+    trouble (0 when tonight had none).
+
+    A night counts once per UTC date, so a same-day retry run does not count
+    it twice. Committed here, so a file that fails to load later in the
+    stage (and rolls back) cannot take the count with it."""
+    misses_key, date_key, read_key = _portal_keys(list_name)
+    if read:
+        set_meta(conn, read_key, stamp)
+    if not missed:
+        set_meta(conn, misses_key, 0)
+        conn.commit()
+        return 0
+    day = stamp[:10]  # stamps are UTC (db.now_iso)
+    try:
+        nights = int(get_meta(conn, misses_key) or 0)
+    except ValueError:
+        nights = 0
+    # A count set back to 0 earlier the same day starts again at 1.
+    if nights == 0 or get_meta(conn, date_key) != day:
+        nights += 1
+        set_meta(conn, misses_key, nights)
+        set_meta(conn, date_key, day)
+    conn.commit()
+    return nights
+
+
 def run(conn: sqlite3.Connection, client: PoliteClient, *, now: str | None = None) -> dict[str, int]:
     stamp = now or now_iso()
     totals: dict[str, int] = {}
     failures: list[str] = []
     duplicates: list[str] = []
+    notices: list[str] = []
+    portal: list[str] = []  # tonight's portal trouble per list, for the detail line
     # Before the listings, so a portal outage does not keep what an older
     # parser loaded. Summary rows go by rule; files loaded under an older
     # parser version are parsed again from the cache. Otherwise a loaded file
@@ -581,19 +681,54 @@ def run(conn: sqlite3.Connection, client: PoliteClient, *, now: str | None = Non
     reloaded = reload_outdated(conn, client, now=stamp)
     failures.extend(reloaded["failures"])
     duplicates.extend(reloaded["duplicates"])
+    # Set once the circuit breaker trips (the reason): the breaker exists to
+    # stop asking a failing host, so no further ESDC request goes out
+    # tonight. The stage does not raise, since the later stages ask other hosts.
+    stopped: str | None = reloaded["aborted"]
+    # The reload's misses, counted against their lists with the listing's and the files'.
+    carried: dict[str, list[tuple[str | None, str]]] = {}
+    for miss_list, miss_name, miss_reason in reloaded["misses"]:
+        carried.setdefault(miss_list, []).append((miss_name, miss_reason))
     for list_name, dataset_id in config.ESDC_DATASETS.items():
         listing = config.CKAN_PACKAGE_SHOW.format(dataset=dataset_id)
         # A portal outage, or a maintenance page served with HTTP 200, costs
-        # this list one night: the quarters already loaded stay as they are.
-        try:
-            package = client.get_json(listing, cache=True, max_age_s=0)
-            resources = english_resources(package)
-        except (FetchError, ValueError, AttributeError) as exc:
-            client.forget(listing)
-            failures.append(f"{list_name} listing: {exc}"[:300])
+        # this list the night and is a notice: ESDC publishes a few quarters a
+        # year, so the quarters already loaded stand and the next run reads
+        # the listing again. From the list's PORTAL_MISS_NIGHTS-th night in a
+        # row it is a failure. A refusal (404, 403) fails the first night,
+        # since waiting will not bring back a moved address or a withdrawn
+        # dataset. Each miss: the file's name (None for the listing), the reason.
+        missed: list[tuple[str | None, str]] = carried.pop(list_name, [])
+        if stopped and not missed:
+            # Never reached tonight: no count change and no notice of its own.
+            portal.append(f"{list_name} not read")
             totals[list_name] = 0
             continue
-        if not resources:
+        resources: list[dict] = []
+        read = False
+        # Skipped when the breaker tripped while reloading.
+        if not stopped:
+            try:
+                package = client.get_json(listing, cache=True, max_age_s=0)
+                resources = english_resources(package)
+                read = True
+            except AbortRun as exc:
+                client.forget(listing)
+                log.warning("esdc: the portal stopped answering at the %s listing; no more ESDC requests "
+                            "tonight: %s", list_name, exc)
+                stopped = abort_reason(exc)
+                missed.append((None, stopped))
+            except FetchError as exc:
+                client.forget(listing)
+                if exc.transient:
+                    missed.append((None, short_reason(exc)))
+                else:
+                    failures.append(f"{list_name} listing: {exc}"[:300])
+            except (ValueError, AttributeError):
+                # Not the JSON CKAN sends: a maintenance page, never kept in the cache.
+                client.forget(listing)
+                missed.append((None, "not the expected JSON"))
+        if read and not resources:
             failures.append(f"{list_name} listing: no English resources")
         loaded = 0
         for res in resources:
@@ -604,8 +739,19 @@ def run(conn: sqlite3.Connection, client: PoliteClient, *, now: str | None = Non
                 continue
             try:
                 data = client.get(url, cache=True, max_age_s=7 * 86400)
+            except AbortRun as exc:
+                log.warning("esdc: the portal stopped answering at %s; no more ESDC requests tonight: %s",
+                            res.get("name") or url, exc)
+                stopped = abort_reason(exc)
+                missed.append((res.get("name") or url, stopped))
+                break
             except FetchError as exc:
-                failures.append(f"{res.get('name')}: {exc}")
+                # A timeout or a 5xx counts against the list like a listing
+                # the portal did not serve; a 404 is a moved file, a failure.
+                if exc.transient:
+                    missed.append((res.get("name") or url, short_reason(exc)))
+                else:
+                    failures.append(f"{res.get('name')}: {exc}")
                 continue
             try:
                 n = load_resource(conn, list_name, res, data, now=stamp)
@@ -626,7 +772,25 @@ def run(conn: sqlite3.Connection, client: PoliteClient, *, now: str | None = Non
             if n:
                 log.info("%s %s: %d rows", list_name, resource_period(res), n)
         totals[list_name] = loaded
+        nights = portal_night(conn, list_name, missed=bool(missed), read=read, stamp=stamp)
+        if missed:
+            # The last miss, which is the breaker's trip when it tripped.
+            name, reason = missed[-1]
+            portal.append(f"{list_name} night {nights} ({reason if name is None else 'download: ' + reason})")
+        for name, reason in missed:
+            if nights >= PORTAL_MISS_NIGHTS:
+                what = f"{list_name} listing" if name is None else name
+                failures.append(f"{what}: the portal has not been readable for {nights} nights ({reason})")
+            elif name is None:
+                notices.append(
+                    f"ESDC portal: the {list_name} listing could not be read tonight ({reason}); the quarters "
+                    f"already loaded stand; read again next run (an item needing attention after "
+                    f"{PORTAL_MISS_NIGHTS} nights)")
+            else:
+                notices.append(f"ESDC portal: {name} could not be downloaded tonight ({reason}); tried again next run")
     detail = f"positive={totals.get('positive', 0)} negative={totals.get('negative', 0)}"
+    if portal:
+        detail += " portal=" + ", ".join(portal)
     if removed["rows"]:
         detail += f" summary_rows_removed={removed['rows']} employers_removed={removed['employers']}"
     if households["rows"]:
@@ -636,7 +800,9 @@ def run(conn: sqlite3.Connection, client: PoliteClient, *, now: str | None = Non
     if duplicates:
         # The reload and the listing can both meet the same copy.
         detail += " duplicates=" + "; ".join(dict.fromkeys(duplicates))[:400]
+    # The reload and the listing loop can both miss the same file: one line for it.
     if failures:
-        detail += " failures=" + "; ".join(failures)[:900]
-    log_run(conn, "esdc", detail=detail, rows_new=sum(totals.values()) + reloaded["rows"], ok=not failures)
+        detail += " failures=" + "; ".join(dict.fromkeys(failures))[:900]
+    log_run(conn, "esdc", detail=detail, rows_new=sum(totals.values()) + reloaded["rows"], ok=not failures,
+            notice=NOTICE_SEP.join(dict.fromkeys(notices)) if notices else None)
     return totals

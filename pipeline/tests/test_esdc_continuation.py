@@ -294,7 +294,7 @@ def test_a_file_without_carried_cells_is_left_as_it_was(conn, fake_client, fixtu
     assert _load_like_the_old_parser(conn, "positive", res, data) == 40
     snapshot = [tuple(r) for r in conn.execute("SELECT * FROM esdc_records ORDER BY id")]
     out = esdc.reload_outdated(conn, fake_client({res["url"]: data}), now=LATER)
-    assert out == {"resources": 1, "rows": 0, "failures": [], "duplicates": []}
+    assert out == {"resources": 1, "rows": 0, "failures": [], "duplicates": [], "misses": [], "aborted": None}
     assert [tuple(r) for r in conn.execute("SELECT * FROM esdc_records ORDER BY id")] == snapshot
 
 

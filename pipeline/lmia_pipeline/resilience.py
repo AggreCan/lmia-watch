@@ -873,7 +873,8 @@ def attention_items(status: Any) -> list[str]:
 def notice_items(status: Any) -> list[str]:
     """The run's notices, one line each: a government notice first listed, IRCC's
     high-wage list adopted or unreadable, a designated-employer list or a news
-    feed that changed state. Information, never an item needing attention: they
+    feed that changed state, an ESDC listing or file the open-data portal did
+    not serve that night. Information, never an item needing attention: they
     go to LAST_RUN.md and the daily check's email, and the run stays ok."""
     if not isinstance(status, dict):
         return []

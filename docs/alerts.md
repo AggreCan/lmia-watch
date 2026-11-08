@@ -35,6 +35,23 @@ notices from the last run". Notices never fail the workflow's last step or
 open the run-attention issue, and they come only from a status written in
 the last 36 hours.
 
+An open-data portal that cannot be read is a notice for up to two nights in
+a row and an item from the third. When open.canada.ca times out, answers
+with a server error, or serves a maintenance page where an ESDC listing
+should be (or a file download fails the same way), the quarters already
+loaded stand and the next run reads the listing again. When so many requests
+fail in a row that the run's circuit breaker trips, the run sends the portal
+nothing more that night and counts it the same way; a list it did not reach
+keeps its count. ESDC publishes a new quarter a few times a year, so one
+night without the listing changes nothing. The nights are counted for each
+list (positive and negative), once per UTC date, and the first night the
+list is read in full sets the count back to zero. A notice leaves the run
+ok, so the retry triggers do not run the refresh again for it and the
+listing is read once a night; a retry that runs for another reason reads it
+again without counting a second night. A refusal (404 or 403), a listing
+with no English files or a file that does not parse is an item from the
+first night.
+
 The check runs at the same time as the first retry (below), so on a morning
 after a failed midnight run the email can name a fault that the retry then
 fixes. The next day's check is quiet if it did.
@@ -141,6 +158,7 @@ in the run status, with `etag`, `beacons` and `content_encoding`.
 | Backup missing or old | The R2 save step failed, or the run did not get that far | Same. If the save step's log says the packed database is above the 300 MiB a single upload accepts, nothing was uploaded and R2 keeps the last backup that fit; saving resumes once the backup is split or sent another way (a multipart upload) |
 | Stage `jobbank` failed | Job Bank changed its pages or blocked the crawler | Check the run log; the page structure may need a parser update |
 | Stage `esdc` failed | The open-data portal changed a file layout | Same |
+| Stage `esdc` failed: "the portal has not been readable for N nights" | open.canada.ca timed out, answered with server errors or served a maintenance page in place of an ESDC listing or file, three or more nights in a row | Check open.canada.ca and the two ESDC datasets. If it is their outage there is nothing to fix here: the quarters already loaded stand, and the first night the list is read clears the item |
 | X post refused | Credits exhausted, keys revoked, or X down | X developer console: credits and app keys |
 | X post unverified | X answered the post with a server error or not at all, and the account's posts could not be read to see whether it went out | Look at the account once. The date is recorded, so no run posts that digest again; a missing post means that pass goes unposted (`docs/x-account.md`) |
 | Bluesky post refused | App password revoked, the handle changed without the `BSKY_HANDLE` secret, or Bluesky down | `docs/bluesky-account.md`: make a new app password, update the secrets |
