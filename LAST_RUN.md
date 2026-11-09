@@ -1,8 +1,8 @@
-Last successful refresh: 2026-11-08 07:10 UTC
+Last successful refresh: 2026-11-09 03:44 UTC
 
-X post: already posted
+X post: posted
 
-Bluesky post: already posted
+Bluesky post: posted
 
 Zenodo deposit: no new quarter
 
@@ -12,9 +12,9 @@ Audience roll-up: rolled up
 
 Search Console: imported 1 day
 
-IndexNow: submitted 644 URLs
+IndexNow: submitted 876 URLs
 
-Open to international candidates: skipped: last international-candidates pass was 5.3 h ago
+Open to international candidates: facet 8039 live, feed 62, new 23, pages read 400, gone on fetch 0, sweep complete (687 gone), grades A 906 B 3303 C 1046
 
 Designated-employer lists: 24 lists (1 blocked, 1 failing, 22 ok), 5727 current rows, 1184 employer matches; blocked: aip_pe; failing: rcip_steinbach; aip_ns: read live, the copy loaded by hand not in use
 
