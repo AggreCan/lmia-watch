@@ -74,6 +74,39 @@ through proxy address ranges, ignoring robots.txt, and a refusal costs under
 a millisecond of CPU against about seven for a rendered page. The agent
 string is a launch flag, so this only slows that operator down.
 
+### AI crawlers
+
+A crawler that builds an AI search index asks from hundreds of addresses, so
+the caps above never see it, and Cloudflare verifies most of them, so the
+edge rule leaves them alone as it leaves Googlebot. In the first two weeks of
+November 2026 Claude-SearchBot, Applebot, Amzn-SearchBot and meta-webindexer
+asked for more than 600,000 pages between them, a quarter of the site's
+requests.
+
+They have a budget of their own (`AI_CRAWLERS` and `crawlerOf` in
+`site/src/limits.ts`, the `CRAWLER_LIMIT` binding): ten requests a minute
+for each crawler, counted by the crawler's name across all its addresses, at
+each Cloudflare location. Past it the site answers 429 with
+`Retry-After: 60` before anything is read for the request. The downloads,
+`/llms.txt`, `/robots.txt`, the sitemaps and the feeds are never refused.
+The search engines' own crawlers (Googlebot, Bingbot, Yandex) and an
+assistant fetching one page for a person who asked (ChatGPT-User,
+Claude-User, Perplexity-User) are not on the list.
+
+`robots.txt` asks the same crawlers for ten seconds between requests in a
+group of their own (`Crawl-delay: 10`). From each crawler's own
+documentation: Anthropic's crawlers keep to the delay; Apple's "does not
+follow crawl-delay" and "adjusts automatically when a site slows down or
+returns errors", which the 429 is for; the others say nothing of it. A test
+holds the Worker's list to the crawlers the file names
+(`site/test/limits.test.ts`).
+
+A 429 still runs the Worker, so the budget bounds the work and tells a
+crawler to slow. A crawler that heeds neither the file nor the answer is
+stopped only at the edge: in the dashboard, AI Crawl Control allows or
+blocks a crawler by name on every plan, and a WAF custom rule can block a
+user agent outright, before the Worker runs.
+
 ## 3. Emergency switch
 
 Security, Settings, Under Attack Mode challenges every visitor at the edge

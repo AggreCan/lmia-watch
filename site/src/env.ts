@@ -31,6 +31,9 @@ export interface Env {
   DOWNLOAD_LIMIT?: RateLimit;
   FORM_LIMIT?: RateLimit;
   FEED_LIMIT?: RateLimit;
+  // An AI crawler's requests, counted by the crawler's name across all its
+  // addresses (wrangler.jsonc "ratelimits", src/limits.ts AI_CRAWLERS).
+  CRAWLER_LIMIT?: RateLimit;
   // Aggregate response counts (src/views.ts). Absent in tests and local
   // development, in which case nothing is counted.
   VIEWS?: AnalyticsEngineDataset;

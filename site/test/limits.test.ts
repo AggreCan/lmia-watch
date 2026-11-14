@@ -1,7 +1,8 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { app } from "../src/index";
-import { bucketFor, machineRoute } from "../src/limits";
+import { AI_CRAWLERS, CRAWLER_RETRY_S, bucketFor, crawlerOf, machineRoute } from "../src/limits";
+import robotsTxt from "../public/robots.txt?raw";
 import { testEnv } from "./assets";
 
 const from = (ip: string, path: string, init: RequestInit = {}, assets?: Fetcher) =>
@@ -178,5 +179,113 @@ describe("automated browsers", () => {
         await res.body?.cancel();
       }
     }
+  });
+});
+
+// -- AI crawlers: one budget a crawler, whatever address it asks from ---------------------------
+
+const APPLEBOT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15 (Applebot/0.1; +http://www.apple.com/go/applebot)";
+const CLAUDE_SEARCH = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Claude-SearchBot/1.0; +searchbot@anthropic.com)";
+const AMZN_SEARCH = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Amzn-SearchBot/0.1) Chrome/119.0.6045.214 Safari/537.36";
+const GOOGLEBOT = "Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
+const READER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
+
+describe("an AI crawler's budget", () => {
+  const as = (ua: string, ip: string, path: string, extra: Record<string, unknown> = {}) =>
+    app.request(path, { headers: { "user-agent": ua, "cf-connecting-ip": ip } }, { ...testEnv(), ...extra });
+
+  it("names the crawlers of AI indexes and models, and no reader, search engine or assistant fetching one page for a person", () => {
+    expect(crawlerOf(APPLEBOT)).toBe("applebot");
+    expect(crawlerOf(CLAUDE_SEARCH)).toBe("claude-searchbot");
+    expect(crawlerOf(AMZN_SEARCH)).toBe("amzn-searchbot");
+    expect(crawlerOf("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 (compatible; meta-webindexer/1.1)")).toBe("meta-webindexer");
+    expect(crawlerOf("Mozilla/5.0 (compatible; ExaSearchBot/1.0; +https://crawler.exa.ai/)")).toBe("exasearchbot");
+    for (const ua of [READER, GOOGLEBOT, "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)", "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)",
+      "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; ChatGPT-User/1.0; +https://openai.com/bot",
+      "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Claude-User/1.0; +Claude-User@anthropic.com)", "Perplexity-User/1.0",
+      "Feedly/1.0 (+https://feedly.com/poller.html; 12 subscribers; like FeedFetcher-Google)", "", undefined]) {
+      expect(crawlerOf(ua), String(ua)).toBeNull();
+    }
+    // Lower case, whole names, each once.
+    expect(AI_CRAWLERS.every((token) => token === token.toLowerCase() && token.length >= 5)).toBe(true);
+    expect(new Set(AI_CRAWLERS).size).toBe(AI_CRAWLERS.length);
+  });
+
+  it("is counted by the crawler's name and never by its address, before the per-address cap", async () => {
+    const crawl = keeper();
+    const pages = keeper();
+    const extra = { CRAWLER_LIMIT: crawl.limiter, PAGE_LIMIT: pages.limiter };
+    expect((await as(APPLEBOT, "17.22.237.11", "/methodology", extra)).status).toBe(200);
+    expect((await as(APPLEBOT, "17.22.245.87", "/data", extra)).status).toBe(200);
+    expect((await as(CLAUDE_SEARCH, "216.73.216.4", "/methodology", extra)).status).toBe(200);
+    expect(crawl.keys).toEqual(["crawler:applebot", "crawler:applebot", "crawler:claude-searchbot"]);
+    // Within its budget it is a page request like any other.
+    expect(pages.keys).toEqual(["page:17.22.237.11", "page:17.22.245.87", "page:216.73.216.4"]);
+    // A reader and a search engine have no such budget.
+    crawl.keys.length = 0;
+    expect((await as(READER, "203.0.113.50", "/methodology", extra)).status).toBe(200);
+    expect((await as(GOOGLEBOT, "66.249.66.1", "/methodology", extra)).status).toBe(200);
+    expect(crawl.keys).toEqual([]);
+  });
+
+  it("answers 429 past it with the wait, reading nothing more, and leaves the routes made for machines open", async () => {
+    const pages = keeper();
+    const refuse = { limit: async () => ({ success: false }) } as unknown as RateLimit;
+    const extra = { CRAWLER_LIMIT: refuse, PAGE_LIMIT: pages.limiter };
+    const res = await as(APPLEBOT, "17.22.237.11", "/employers/emp-a000000001", extra);
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe(String(CRAWLER_RETRY_S));
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect((await res.text()).length).toBeLessThan(200);
+    // Refused before the per-address cap is asked: nothing else ran for it.
+    expect(pages.keys).toEqual([]);
+    // The real assets binding, which serves site/public, with the refusing limiter beside it.
+    for (const path of ["/robots.txt", "/llms.txt"]) {
+      const open = await app.request(path, { headers: { "user-agent": APPLEBOT, "cf-connecting-ip": "17.22.237.11" } }, { ...env, ...extra });
+      expect(open.status, path).toBe(200);
+    }
+    // A reader is untouched by a crawler's refusal.
+    expect((await as(READER, "203.0.113.51", "/methodology", extra)).status).toBe(200);
+  });
+
+  it("never takes the site down when the limiter faults", async () => {
+    const broken = { limit: async () => { throw new Error("limiter down"); } } as unknown as RateLimit;
+    expect((await as(APPLEBOT, "17.22.237.11", "/methodology", { CRAWLER_LIMIT: broken })).status).toBe(200);
+  });
+
+  it("is ten requests a minute for a crawler, from any number of addresses", async () => {
+    if (!(env as unknown as { CRAWLER_LIMIT?: unknown }).CRAWLER_LIMIT) return;
+    let first429 = 0;
+    for (let i = 1; i <= 14; i++) {
+      const res = await as(AMZN_SEARCH, `198.51.100.${i}`, "/methodology");
+      if (res.status === 429) {
+        first429 = i;
+        break;
+      }
+      expect(res.status, `request ${i}`).toBe(200);
+    }
+    expect(first429).toBe(11);
+    // Another crawler has its own budget.
+    expect((await as(CLAUDE_SEARCH, "198.51.100.90", "/methodology")).status).toBe(200);
+  });
+
+  it("is what robots.txt tells the same crawlers: their own group, the general rules and ten seconds apart", () => {
+    const groups = robotsTxt.split(/\n\s*\n/).filter((g) => /^User-agent:/m.test(g));
+    const group = groups.find((g) => /^User-agent: Applebot$/m.test(g)) ?? "";
+    const lines = group.split("\n").filter((l) => l && !l.startsWith("#"));
+    const agents = lines.filter((l) => l.startsWith("User-agent: ")).map((l) => l.slice(12));
+    expect(agents).toEqual(expect.arrayContaining(["Applebot", "Claude-SearchBot", "OAI-SearchBot", "Amzn-SearchBot", "meta-webindexer", "ExaSearchBot"]));
+    // Every crawler the file gives this group or shuts out, the Worker holds to the budget too.
+    const shut = groups.find((g) => /^Disallow: \/$/m.test(g)) ?? "";
+    const named = [...agents, ...shut.split("\n").filter((l) => l.startsWith("User-agent: ")).map((l) => l.slice(12))];
+    // Not budgeted: two tokens that are a preference and never a crawler, and the link-index tools, which the file shuts out and are not AI crawlers.
+    const NOT_BUDGETED = ["ShapBot", "Google-Extended", "Applebot-Extended", "DataForSeoBot", "AhrefsBot", "SemrushBot", "MJ12bot", "DotBot"];
+    for (const name of named.filter((n) => !NOT_BUDGETED.includes(n))) expect(crawlerOf(`${name}/1.0`), name).not.toBeNull();
+    // The general group's rules, repeated, since a crawler reads only its own group.
+    const general = (groups.find((g) => /^User-agent: \*$/m.test(g)) ?? "").split("\n").filter((l) => /^(Allow|Disallow):/.test(l));
+    for (const rule of general) expect(lines, rule).toContain(rule);
+    expect(lines).toContain("Crawl-delay: 10");
+    // The pages stay open to them.
+    for (const closed of ["Disallow: /employers/", "Disallow: /occupations/", "Disallow: /places/", "Disallow: /"]) expect(lines).not.toContain(closed);
   });
 });

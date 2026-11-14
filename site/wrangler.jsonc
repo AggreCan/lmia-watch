@@ -20,7 +20,14 @@
     { "name": "API_LIMIT", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } },
     { "name": "DOWNLOAD_LIMIT", "namespace_id": "1003", "simple": { "limit": 10, "period": 60 } },
     { "name": "FORM_LIMIT", "namespace_id": "1004", "simple": { "limit": 5, "period": 60 } },
-    { "name": "FEED_LIMIT", "namespace_id": "1005", "simple": { "limit": 600, "period": 60 } }
+    { "name": "FEED_LIMIT", "namespace_id": "1005", "simple": { "limit": 600, "period": 60 } },
+    // An AI crawler (src/limits.ts AI_CRAWLERS), counted by the crawler's name
+    // and not by address, since one asks from hundreds of addresses: ten
+    // requests a minute for each crawler at each Cloudflare location, at most
+    // 14,400 a day there. Every request past it still runs the Worker for the
+    // 429, so this bounds the work and tells the crawler to slow;
+    // public/robots.txt asks the same of those that read it.
+    { "name": "CRAWLER_LIMIT", "namespace_id": "1006", "simple": { "limit": 10, "period": 60 } }
   ],
   // The daily check (src/watchdog.ts): 06:00 UTC, after the nightly run has had
   // its window. It emails the operator through the email binding when the data,
