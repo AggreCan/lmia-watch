@@ -17,8 +17,12 @@ import { DOWNLOADS } from "./pages/data";
 // blob5 referring host, blob6 method, blob7 feed file (empty except for a
 // feed), blob8 "bot" or "human", blob9 device ("desktop", "mobile" or
 // "tablet"; empty for a bot), blob10 the visitor code (empty for a bot and
-// when VIEWS_SALT_KEY is not set). Points written before 2026-10-30 stop at
-// blob6 or blob7 and read back as empty strings in the later columns.
+// when VIEWS_SALT_KEY is not set), blob11 the page cache (pagecache.ts):
+// "hit" for a page served from it, "miss" for a page it could have served
+// that was rendered, empty for everything it does not consider (other
+// routes and methods, forms, the API, files, errors). Points written before
+// 2026-10-30 stop at blob6 or blob7, and points written before the page
+// cache at blob10; the later columns read back as empty strings.
 //
 // The visitor code counts people per day without keeping anything that
 // identifies them: SHA-256 of the day's salt, the client address and the
@@ -247,6 +251,7 @@ export function viewPoint(c: Context<AppEnv>, visitor = ""): AnalyticsEngineData
     // The device and the visitor code describe a person's browser, so a bot leaves both empty.
     agent, agent === "human" ? deviceClass(ua, c.req.header("sec-ch-ua-mobile")) : "",
     agent === "human" && /^[0-9a-f]{16}$/.test(visitor) ? visitor : "",
+    c.get("pageCache") ?? "",
   ];
   const doubles = [c.res.status];
   // double2 for a feed only; every other point leaves it empty (read back as 0).

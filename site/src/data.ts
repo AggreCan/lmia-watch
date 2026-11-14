@@ -277,12 +277,22 @@ export function clearParsedCache(): void {
   parsedChars = 0;
 }
 
-// A kept value is shared between requests, so it is frozen all the way down:
-// a page that changed it in place would change it for every later request,
-// and in strict mode (every module is) the attempt throws instead. Every
-// loaded value is frozen, kept or not, so a page behaves the same either way
-// and the tests, whose fake files often carry no ETag, see what production
-// sees. A parsed file is a tree, so no node is visited twice.
+// A kept value is shared between requests, so a page that changed it in place
+// would change it for every later request. Every loaded value is frozen,
+// kept or not, so a page behaves the same either way, and in strict mode
+// (every module is) a change in place throws instead. The tests freeze each
+// file all the way down (test/setup.ts calls freezeDeeply), so a page that
+// changes a nested row fails there; production freezes the top level only,
+// because walking every node costs about a third as much again as JSON.parse
+// itself (0.12 to 0.14 ms for a 190 to 240 KB profile shard, measured with
+// scripts/bench-render.mjs on 2026-11-14), on every profile request that
+// finds its shard unparsed. A parsed file is a tree, so no node is visited twice.
+let freezeAllTheWay = false;
+
+export function freezeDeeply(on: boolean): void {
+  freezeAllTheWay = on;
+}
+
 function deepFreeze<T>(root: T): T {
   const stack: unknown[] = [root];
   while (stack.length > 0) {
@@ -317,7 +327,10 @@ export async function loadJson<T>(env: Env, path: string): Promise<T | null> {
     console.error(`asset ${path} is not valid JSON: ${String(e).slice(0, 200)}`);
     return null;
   }
-  if (typeof value === "object" && value !== null) deepFreeze(value);
+  if (typeof value === "object" && value !== null) {
+    if (freezeAllTheWay) deepFreeze(value);
+    else Object.freeze(value);
+  }
   if (etag && text.length <= CACHE_MAX_ENTRY_CHARS) keep(path, { etag, value, chars: text.length });
   return value as T;
 }

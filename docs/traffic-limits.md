@@ -15,6 +15,10 @@ the exception: the Worker runs first for them so their polls are counted
 inside the Worker (below), wide enough for a feed service that polls many
 feeds from one address.
 
+CPU time is the other cost: the page cache, Smart Placement and the
+start-up work that keep it down, and how to read it in Cloudflare's
+analytics, are in `docs/performance.md`.
+
 Three layers keep abusive traffic off the Worker.
 
 ## 1. Edge rate-limiting rule (dashboard, once)

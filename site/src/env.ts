@@ -1,4 +1,5 @@
 import type { Lang } from "./i18n";
+import type { SiteRows } from "./pages/employer";
 
 export interface Env {
   DB: D1Database;
@@ -41,9 +42,21 @@ export interface Env {
   // is HMAC-SHA-256 of the UTC date under it. Unset: no code is written and
   // the roll-up counts no unique visitors. Set with `wrangler secret put`.
   VIEWS_SALT_KEY?: string;
+  // The deployed version (wrangler.jsonc "version_metadata"). Its id is part
+  // of every page cache key (src/pagecache.ts); without it nothing is cached.
+  CF_VERSION_METADATA?: { id: string; tag: string };
 }
 
 export type AppEnv = {
   Bindings: Env;
-  Variables: { lang: Lang };
+  Variables: {
+    lang: Lang;
+    // Set by the page cache (src/pagecache.ts): "hit" when the page came from
+    // the cache, "miss" when it was rendered for a request the cache could
+    // have answered; unset otherwise. The views counter records it (blob11).
+    pageCache?: "hit" | "miss";
+    // A profile's published responses and corrections, read by the page cache
+    // for its key and handed to the employer page so it does not read them again.
+    siteRows?: SiteRows;
+  };
 };

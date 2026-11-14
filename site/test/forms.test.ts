@@ -118,7 +118,7 @@ describe("the response form opens in a browser only", () => {
     expect(await res.text()).toBe("This form opens in a web browser from the employer's profile: https://lmiawatch.ca/employers/emp-a000000001");
     expect(points).toHaveLength(1);
     expect(points[0].blobs?.slice(0, 2)).toEqual(["/employers/:id/respond", "page"]);
-    expect(points[0].blobs?.slice(7)).toEqual(["bot", "", ""]);
+    expect(points[0].blobs?.slice(7)).toEqual(["bot", "", "", ""]);
     expect(points[0].doubles).toEqual([403]);
   });
 

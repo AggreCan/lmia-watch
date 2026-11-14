@@ -3,6 +3,17 @@
   "name": "lmia-watch",
   "main": "src/index.tsx",
   "compatibility_date": "2025-12-01",
+  // Start-up cost: every new isolate compiles and runs the whole bundle
+  // before its first request, and start-up was a quarter to a third of all
+  // CPU time on 2026-11-13. Minifying cuts the compile by about 1.4 ms (the
+  // bundle goes from 943 to 622 KiB) and leaving out esbuild's name-keeping
+  // wrappers (769 calls of __name at load) cuts the run by about 1.2 ms;
+  // nothing in the Worker reads a function's name. Measured in Node,
+  // 2026-11-14 (docs/performance.md). The source map is uploaded so the
+  // logs' stack traces still name the source lines.
+  "minify": true,
+  "keep_names": false,
+  "upload_source_maps": true,
   // Never publish under the account's workers.dev subdomain; the site lives on its own domain.
   "workers_dev": false,
   "routes": [
@@ -89,5 +100,19 @@
   },
   "observability": {
     "enabled": true
-  }
+  },
+  // Smart Placement: most page requests read D1 (the forms database on every
+  // profile, the search database on /search), so Cloudflare may run the
+  // Worker near the databases instead of in whichever of 200 locations the
+  // request arrived at. What we want from it is fewer locations running the
+  // Worker: each location keeps its own isolates and its own page cache
+  // (src/pagecache.ts), so fewer of them means far fewer cold isolates (a
+  // quarter to a third of all CPU time on 2026-11-13) and a hotter cache. The
+  // price is some tens of milliseconds of latency for far-away readers.
+  // Static files are still served from the location nearest the reader.
+  // docs/performance.md says how to check it.
+  "placement": { "mode": "smart" },
+  // The id of the deployed version (src/pagecache.ts puts it in every page
+  // cache key, so a deploy never serves a page rendered by older code).
+  "version_metadata": { "binding": "CF_VERSION_METADATA" }
 }

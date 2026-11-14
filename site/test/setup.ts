@@ -1,5 +1,10 @@
 import { env } from "cloudflare:test";
 import { beforeAll } from "vitest";
+import { freezeDeeply } from "../src/data";
+
+// Production freezes a loaded file's top level only (src/data.ts); the tests
+// freeze every node, so a page that changes a shared row in place throws here.
+freezeDeeply(true);
 
 // Split a SQL file into statements: drop comment lines, then cut on a
 // semicolon that ends a line. Seed values never contain ";\n". A trigger's

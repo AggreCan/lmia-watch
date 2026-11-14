@@ -3604,14 +3604,20 @@ export function fmtWage(min: number | null, max: number | null, unit: string | n
 
 // -- indicator basis -------------------------------------------------------------
 
-const BASIS_KEYS: readonly Key[] = (Object.keys(STRINGS) as Key[]).filter((k) => k.startsWith("basis."));
-
 function basisPattern(english: string): RegExp {
   const escaped = english.replace(/[.*+?^$()|[\]\\]/g, "\\$&");
   return new RegExp(`^${escaped.replace(/\{(\w+)\}/g, (_m, name: string) => `(?<${name}>.+?)`)}$`);
 }
 
-const BASIS_PATTERNS: { key: Key; re: RegExp }[] = BASIS_KEYS.map((key) => ({ key, re: basisPattern(STRINGS[key].en) }));
+// Built on the first French page that shows a basis sentence rather than at
+// start-up, which every new isolate pays: English pages never read them.
+let basisPatterns: { key: Key; re: RegExp }[] | null = null;
+
+function basisPatternList(): { key: Key; re: RegExp }[] {
+  return (basisPatterns ??= (Object.keys(STRINGS) as Key[])
+    .filter((k) => k.startsWith("basis."))
+    .map((key) => ({ key, re: basisPattern(STRINGS[key].en) })));
+}
 
 // Quarters become "T1 2026" wherever they appear; counts and amounts are
 // grouped and decimals take a comma, but a code (the NOC, a posting ID) is
@@ -3678,7 +3684,7 @@ function frValue(name: string, v: string): string {
 // patterns do not know, come back unchanged with translated: false.
 export function basisText(lang: Lang, basis: string): { text: string; translated: boolean } {
   if (lang !== "fr") return { text: basis, translated: true };
-  for (const { key, re } of BASIS_PATTERNS) {
+  for (const { key, re } of basisPatternList()) {
     const m = re.exec(basis);
     if (!m) continue;
     const vars: Vars = {};

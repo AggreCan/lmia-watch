@@ -13,11 +13,12 @@
 // and drops a strong one.
 //
 // Registered inside the measure middleware (index.tsx), so the views counter
-// records a 304 as a 304. Every other response passes untouched: other
-// statuses, other methods, anything not HTML (the API, the downloads, the
-// sitemaps, robots.txt), the Atom feeds under /data/feeds, which pass the
-// assets layer's own ETag and 304 through, and a response that already
-// carries an ETag.
+// records a 304 as a 304. A page that already carries its ETag (a page served
+// from the page cache, or one the page cache tagged as it stored it, see
+// pagecache.ts) is compared without hashing again. Every other response
+// passes untouched: other statuses, other methods, anything not HTML (the
+// API, the downloads, the sitemaps, robots.txt), and the Atom feeds under
+// /data/feeds, which pass the assets layer's own ETag and 304 through.
 
 import type { Context, Next } from "hono";
 import type { AppEnv } from "./env";
@@ -47,13 +48,33 @@ export function noneMatch(header: string | undefined | null, etag: string): bool
   });
 }
 
+// The empty 304 for a page whose tag the request named.
+function notModified(headers: Headers): Response {
+  const kept = new Headers();
+  for (const name of KEPT) {
+    const value = headers.get(name);
+    if (value !== null) kept.set(name, value);
+  }
+  for (const cookie of headers.getSetCookie()) kept.append("set-cookie", cookie);
+  return new Response(null, { status: 304, headers: kept });
+}
+
 export async function conditional(c: Context<AppEnv>, next: Next): Promise<void> {
   await next();
   const method = c.req.method;
   if (method !== "GET" && method !== "HEAD") return;
   const res = c.res;
-  if (res.status !== 200 || res.headers.has("etag") || c.req.path.startsWith("/data/")) return;
+  if (res.status !== 200 || c.req.path.startsWith("/data/")) return;
   if (!(res.headers.get("content-type") ?? "").toLowerCase().startsWith("text/html")) return;
+  const tagged = res.headers.get("etag");
+  if (tagged !== null) {
+    if (!noneMatch(c.req.header("if-none-match"), tagged)) return;
+    await res.body?.cancel().catch(() => undefined);
+    const headers = new Headers(res.headers);
+    c.res = undefined;
+    c.res = notModified(headers);
+    return;
+  }
   const body = await res.arrayBuffer();
   const etag = await bodyEtag(body);
   const headers = new Headers(res.headers);
@@ -62,13 +83,7 @@ export async function conditional(c: Context<AppEnv>, next: Next): Promise<void>
   // would put the content headers back on the 304; clearing it first stops that.
   c.res = undefined;
   if (noneMatch(c.req.header("if-none-match"), etag)) {
-    const kept = new Headers();
-    for (const name of KEPT) {
-      const value = headers.get(name);
-      if (value !== null) kept.set(name, value);
-    }
-    for (const cookie of headers.getSetCookie()) kept.append("set-cookie", cookie);
-    c.res = new Response(null, { status: 304, headers: kept });
+    c.res = notModified(headers);
     return;
   }
   c.res = new Response(body, { status: 200, headers });

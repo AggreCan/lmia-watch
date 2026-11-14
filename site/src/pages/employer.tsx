@@ -3,7 +3,7 @@ import {
   type AlbertaRow, type Area, type CarrierRow, type DesignatedRow, esdcSource, type GrantRow, type IntlPostingRow, loadAlias, loadJson,
   loadProfile, lmiaGap, loadStats, type Profile,
 } from "../data";
-import type { AppEnv } from "../env";
+import type { AppEnv, Env } from "../env";
 import {
   basisText, decimal, indicatorLabel, indicatorStateLabel, numberLocale, provinceName, streamLabel, t, tj, tn, type Key, type Lang,
 } from "../i18n";
@@ -337,19 +337,26 @@ function gradeText(lang: Lang, grade: string): string {
   return t(lang, "employer.grade_possible");
 }
 
-async function siteRows(c: Context<AppEnv>, id: string): Promise<{ responses: ResponseRow[]; corrections: CorrectionRow[] }> {
-  if (!c.env.DB) return { responses: [], corrections: [] };
+// The profile's published responses and corrections from the forms database.
+// Null when the database cannot be read, which the page shows as none; the
+// page cache (src/pagecache.ts) reads them first, for its key, and hands them
+// to the page, so a profile reads them once either way.
+export interface SiteRows { responses: ResponseRow[]; corrections: CorrectionRow[] }
+const NO_SITE_ROWS: SiteRows = { responses: [], corrections: [] };
+
+export async function loadSiteRows(env: Env, id: string): Promise<SiteRows | null> {
+  if (!env.DB) return NO_SITE_ROWS;
   try {
-    const [responses, corrections] = await c.env.DB.batch([
-      c.env.DB.prepare("SELECT received_at, statement, contact_name FROM employer_responses WHERE employer_id = ? AND published = 1 ORDER BY received_at DESC").bind(id),
-      c.env.DB.prepare("SELECT received_at, record_ref, request, resolution, resolved_at FROM corrections WHERE employer_id = ? AND published = 1 ORDER BY received_at DESC").bind(id),
+    const [responses, corrections] = await env.DB.batch([
+      env.DB.prepare("SELECT received_at, statement, contact_name FROM employer_responses WHERE employer_id = ? AND published = 1 ORDER BY received_at DESC").bind(id),
+      env.DB.prepare("SELECT received_at, record_ref, request, resolution, resolved_at FROM corrections WHERE employer_id = ? AND published = 1 ORDER BY received_at DESC").bind(id),
     ]);
     return {
       responses: (responses.results ?? []) as unknown as ResponseRow[],
       corrections: (corrections.results ?? []) as unknown as CorrectionRow[],
     };
   } catch {
-    return { responses: [], corrections: [] };
+    return null;
   }
 }
 
@@ -393,8 +400,9 @@ export async function employerPage(c: Context<AppEnv>): Promise<Response> {
   // The city and occupation links read their index files alongside; a missing
   // file means plain text.
   const fsa = employer.postal_code ? employer.postal_code.slice(0, 3).toUpperCase() : "";
+  const known = c.get("siteRows");
   const [{ responses, corrections }, area, cityHref, occupations, directories] = await Promise.all([
-    siteRows(c, id),
+    known ?? loadSiteRows(c.env, id).then((rows) => rows ?? NO_SITE_ROWS),
     /^[A-Z][0-9][A-Z]$/.test(fsa) ? loadJson<Area>(c.env, `areas/${fsa}.json`).catch(() => null) : Promise.resolve(null),
     cityPath(c.env, employer.province, employer.city),
     occupationLinks(c.env),

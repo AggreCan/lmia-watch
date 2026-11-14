@@ -92,7 +92,7 @@ describe("the feed route", () => {
     expect(points).toEqual([
       {
         indexes: ["/data/feeds/:file"],
-        blobs: ["/data/feeds/:file", "feed", "en", "", "", "GET", "feeds/canada/pending.xml", "bot", "", ""],
+        blobs: ["/data/feeds/:file", "feed", "en", "", "", "GET", "feeds/canada/pending.xml", "bot", "", "", ""],
         doubles: [200, 12],
       },
     ]);
@@ -140,7 +140,7 @@ describe("the feed route", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ feeds: [] });
     expect(points).toEqual([
-      { indexes: ["/data/feeds/index.json"], blobs: ["/data/feeds/index.json", "file", "en", "", "", "GET", "", "bot", "", ""], doubles: [200] },
+      { indexes: ["/data/feeds/index.json"], blobs: ["/data/feeds/index.json", "file", "en", "", "", "GET", "", "bot", "", "", ""], doubles: [200] },
     ]);
   });
 

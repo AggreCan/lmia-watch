@@ -5,6 +5,7 @@ import { secureHeaders } from "hono/secure-headers";
 import { api } from "./api";
 import { conditional } from "./conditional";
 import { loadStats } from "./data";
+import { pageCache } from "./pagecache";
 import type { AppEnv, Env } from "./env";
 import { kofiWebhook } from "./hooks";
 import { refuseAutomatedBrowser, throttle } from "./limits";
@@ -80,6 +81,10 @@ app.use("*", measure);
 app.use("*", refuseAutomatedBrowser);
 // Inside measure, so a page answered 304 is counted with that status.
 app.use("*", conditional);
+// Inside conditional, which answers a cached page's stored ETag with a 304,
+// and after the rate limits and the refusal above, so a refused request is
+// never served from the cache (pagecache.ts).
+app.use("*", pageCache);
 
 app.route("/api", api);
 
