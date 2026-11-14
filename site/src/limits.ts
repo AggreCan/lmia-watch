@@ -56,6 +56,32 @@ export function crawlerOf(userAgent: string | undefined): string | null {
 // The seconds a refused crawler is asked to wait: the budget's own period.
 export const CRAWLER_RETRY_S = 60;
 
+// -- search engines ---------------------------------------------------------------------------
+//
+// Googlebot and Bingbot index the site for people's searches, and the site
+// wants every page they will take, at any pace. Google reads no Crawl-delay
+// and, on meeting 429s, "reduces your site's crawl rate across the whole
+// hostname"; Bing's group in robots.txt carries no delay. So a request that
+// Cloudflare's edge has verified as a search engine's crawler, and whose user
+// agent names one of the two, is never counted against the per-address page
+// cap below. Neither test is enough alone: anyone can write the name, and the
+// edge gives the same category to the crawlers of AI indexes (KeenableBot,
+// ExaSearchBot and OAI-SearchBot on 2026-11-14), which keep their budget
+// above. The other caps (the API, the downloads, the forms) hold for everyone.
+export const SEARCH_ENGINES: readonly string[] = ["googlebot", "google-inspectiontool", "bingbot"];
+export const SEARCH_ENGINE_CATEGORY = "Search Engine Crawler";
+
+export function searchEngine(userAgent: string | undefined, verifiedBotCategory: unknown): boolean {
+  if (verifiedBotCategory !== SEARCH_ENGINE_CATEGORY) return false;
+  const ua = (userAgent ?? "").toLowerCase();
+  return SEARCH_ENGINES.some((token) => ua.includes(token));
+}
+
+// The verified-bot category Cloudflare's edge gave the request, when it gave one.
+function edgeCategory(c: Context<AppEnv>): unknown {
+  return (c.req.raw as Request & { cf?: { verifiedBotCategory?: unknown } }).cf?.verifiedBotCategory;
+}
+
 const BINDING: Record<Bucket, keyof Env> = {
   page: "PAGE_LIMIT", api: "API_LIMIT", download: "DOWNLOAD_LIMIT", form: "FORM_LIMIT", feed: "FEED_LIMIT",
 };
@@ -86,6 +112,8 @@ export async function throttle(c: Context<AppEnv>, next: Next): Promise<Response
     }
   }
   const bucket = bucketFor(c.req.method, c.req.path);
+  // A verified search engine's crawler reads the pages at its own pace.
+  if (bucket === "page" && searchEngine(c.req.header("user-agent"), edgeCategory(c))) return next();
   const limiter = c.env[BINDING[bucket]] as RateLimit | undefined;
   if (!limiter) return next();
   let allowed = true;

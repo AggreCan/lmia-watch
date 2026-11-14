@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { app } from "../src/index";
-import { AI_CRAWLERS, CRAWLER_RETRY_S, bucketFor, crawlerOf, machineRoute } from "../src/limits";
+import { AI_CRAWLERS, CRAWLER_RETRY_S, SEARCH_ENGINE_CATEGORY, bucketFor, crawlerOf, machineRoute, searchEngine } from "../src/limits";
 import robotsTxt from "../public/robots.txt?raw";
 import { testEnv } from "./assets";
 
@@ -287,5 +287,65 @@ describe("an AI crawler's budget", () => {
     expect(lines).toContain("Crawl-delay: 10");
     // The pages stay open to them.
     for (const closed of ["Disallow: /employers/", "Disallow: /occupations/", "Disallow: /places/", "Disallow: /"]) expect(lines).not.toContain(closed);
+  });
+});
+
+// -- search engines: Google and Bing read the pages at their own pace -----------------------------
+
+describe("a verified search engine's crawler", () => {
+  const BINGBOT = "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm) Chrome/116.0.1938.76 Safari/537.36";
+  // A request as the edge hands it over: its address and agent, and the verified-bot category when the edge gave one.
+  const send = (ua: string, category: string | undefined, path: string, extra: Record<string, unknown>) => {
+    const req = new Request(`http://localhost${path}`, { headers: { "user-agent": ua, "cf-connecting-ip": "66.249.66.1" } });
+    if (category !== undefined) Object.defineProperty(req, "cf", { value: { country: "US", verifiedBotCategory: category } });
+    return app.fetch(req, { ...testEnv(), ...extra });
+  };
+  const refuse = { limit: async () => ({ success: false }) } as unknown as RateLimit;
+
+  it("is Googlebot or Bingbot by name and by the edge's own verification, never by one of the two alone", () => {
+    expect(searchEngine(GOOGLEBOT, SEARCH_ENGINE_CATEGORY)).toBe(true);
+    expect(searchEngine(BINGBOT, SEARCH_ENGINE_CATEGORY)).toBe(true);
+    expect(searchEngine("Mozilla/5.0 (compatible; Google-InspectionTool/1.0;)", SEARCH_ENGINE_CATEGORY)).toBe(true);
+    // The name written by anyone: no verification, or another kind of verified bot.
+    for (const category of [undefined, null, "", "AI Search", "Page Preview", 1]) expect(searchEngine(GOOGLEBOT, category), String(category)).toBe(false);
+    // The category the edge also gives the crawlers of AI indexes, and other engines: not these two.
+    for (const ua of ["Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; KeenableBot/1.0; +https://keenable.ai/bot)",
+      "Mozilla/5.0 (compatible; ExaSearchBot/1.0; +https://crawler.exa.ai/)", "Mozilla/5.0 (compatible; YandexBot/3.0; +http://yandex.com/bots)", READER, "", undefined]) {
+      expect(searchEngine(ua, SEARCH_ENGINE_CATEGORY), String(ua)).toBe(false);
+    }
+  });
+
+  it("is never held to the per-address page cap, while the same name without the edge's verification is", async () => {
+    const pages = keeper();
+    expect((await send(GOOGLEBOT, SEARCH_ENGINE_CATEGORY, "/methodology", { PAGE_LIMIT: pages.limiter })).status).toBe(200);
+    expect((await send(BINGBOT, SEARCH_ENGINE_CATEGORY, "/methodology", { PAGE_LIMIT: pages.limiter })).status).toBe(200);
+    // Not asked at all: nothing was counted for either.
+    expect(pages.keys).toEqual([]);
+    // Past any cap it still answers.
+    expect((await send(GOOGLEBOT, SEARCH_ENGINE_CATEGORY, "/methodology", { PAGE_LIMIT: refuse })).status).toBe(200);
+    // The name alone, or the name under another category, is counted and refused like any address.
+    expect((await send(GOOGLEBOT, undefined, "/methodology", { PAGE_LIMIT: refuse })).status).toBe(429);
+    expect((await send(GOOGLEBOT, "Page Preview", "/methodology", { PAGE_LIMIT: refuse })).status).toBe(429);
+    // An AI index's crawler under the search category keeps its own budget.
+    const crawl = keeper();
+    await send("Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; KeenableBot/1.0; +https://keenable.ai/bot)", SEARCH_ENGINE_CATEGORY,
+      "/methodology", { CRAWLER_LIMIT: crawl.limiter, PAGE_LIMIT: pages.limiter });
+    expect(crawl.keys).toEqual(["crawler:keenablebot"]);
+  });
+
+  it("keeps the caps that are not pages: the API answers 429 to it past its cap", async () => {
+    expect((await send(GOOGLEBOT, SEARCH_ENGINE_CATEGORY, "/api/stats", { API_LIMIT: refuse })).status).toBe(429);
+  });
+
+  it("is told no delay in robots.txt: Bing in a group of its own, and Google reads none", () => {
+    const groups = robotsTxt.split(/\n\s*\n/).filter((g) => /^User-agent:/m.test(g));
+    const bing = groups.find((g) => /^User-agent: bingbot$/m.test(g)) ?? "";
+    expect(bing).toContain("Allow: /");
+    // Its rules, the comment above them aside, name no delay.
+    expect(bing.split("\n").filter((l) => !l.startsWith("#")).join("\n")).not.toContain("Crawl-delay");
+    // Neither is named in the group of AI crawlers or in the group shut out.
+    for (const g of groups.filter((x) => /^(Crawl-delay: 10|Disallow: \/)$/m.test(x))) {
+      expect(g).not.toMatch(/^User-agent: (Googlebot|bingbot)$/im);
+    }
   });
 });

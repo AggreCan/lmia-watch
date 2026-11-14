@@ -74,6 +74,22 @@ through proxy address ranges, ignoring robots.txt, and a refusal costs under
 a millisecond of CPU against about seven for a rendered page. The agent
 string is a launch flag, so this only slows that operator down.
 
+### Search engines
+
+Googlebot and Bingbot index the site for people's searches, and the site
+wants every page they will take, at any pace. Google reads no `Crawl-delay`
+and slows its crawl of a whole host when it meets 429s; Bing's group in
+`robots.txt` carries no delay. So a request that Cloudflare's edge has
+verified as a search engine's crawler (`request.cf.verifiedBotCategory` is
+"Search Engine Crawler"), and whose user agent names Googlebot, Bingbot or
+Google's inspection tool, is never counted against the pages cap
+(`searchEngine` in `site/src/limits.ts`). Both tests are needed: anyone can
+write the name, and the edge gives the same category to some crawlers of AI
+indexes (ExaSearchBot, OAI-SearchBot and KeenableBot on 2026-11-14), which
+keep the budget below. The API, download and form caps hold for everyone,
+and the edge rule above already leaves verified crawlers alone
+(`not cf.client.bot`).
+
 ### AI crawlers
 
 A crawler that builds an AI search index asks from hundreds of addresses, so
