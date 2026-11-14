@@ -3,13 +3,17 @@
 import gzip
 import json
 import os
+import re
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
+import requests
 
 from lmia_pipeline import nightly
+from lmia_pipeline import worker_metrics as wm
 from lmia_pipeline.db import connect, log_run, upsert_employer
 
 NOW = "2026-10-18T00:00:00Z"
@@ -413,3 +417,146 @@ def test_restore_accepts_a_packed_backup(tmp_path):
     assert indexes_of(db)[0] == set()
     connect(db).close()
     assert len(indexes_of(db)[0]) == 20
+
+
+# -- the Worker's CPU time ----------------------------------------------------
+
+CPU_ACCOUNT = "0123456789abcdef0123456789abcdef"
+CPU_TOKEN = "analytics-token-never-printed"
+CPU_SUMMARY = {
+    "state": "ok", "detail": "1 day fetched", "days_fetched": ["2026-11-13"], "day": "2026-11-13",
+    "yesterday": {"date": "2026-11-13", "requests": 238_037, "cpu_ms": 2_305_908, "mean_cpu_ms": 9.687,
+                  "startup_share": 0.32},
+    "month": "2026-11", "month_to_date_cpu_ms": 26_100_000, "month_projection_cpu_ms": 48_200_000,
+    "included_cpu_ms": 30_000_000,
+}
+WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "nightly.yml"
+
+
+class CpuResponse:
+    def __init__(self, status, body):
+        self.status_code = status
+        self._body = body
+        self.text = json.dumps(body)
+
+    def json(self):
+        return self._body
+
+
+class CpuHttp:
+    """Answers the GraphQL query with one group per day in the window asked, or with status."""
+
+    def __init__(self, status=200):
+        self.status = status
+        self.posts = []
+        self.closed = False
+
+    def post(self, url, json=None, headers=None, timeout=None):
+        self.posts.append({"url": url, "json": json, "headers": headers})
+        if self.status != 200:
+            return CpuResponse(self.status, {"errors": [{"message": "server error"}]})
+        day, until = date.fromisoformat(json["variables"]["since"][:10]), json["variables"]["until"][:10]
+        groups = []
+        while day.isoformat() < until:
+            groups.append({"dimensions": {"date": day.isoformat()},
+                           "sum": {"requests": 1000, "errors": 0, "subrequests": 5, "cpuTimeUs": 9_000_000,
+                                   "startupCpuTimeUs": 3_000_000, "responseBodySize": 100},
+                           "quantiles": {"cpuTimeP50": 4000, "cpuTimeP90": 9000, "cpuTimeP99": 30000,
+                                         "startupCpuTimeUsP50": 2000, "memoryUsageBytesP50": 2_097_152}})
+            day += timedelta(days=1)
+        return CpuResponse(200, {"data": {"viewer": {"accounts": [{"inv": groups}]}}, "errors": None})
+
+    def close(self):
+        self.closed = True
+
+
+def test_worker_metrics_command_writes_the_summary_and_prints_no_token(tmp_path, monkeypatch, capsys, caplog):
+    caplog.set_level("DEBUG")
+    monkeypatch.setenv(wm.TOKEN_ENV, CPU_TOKEN)
+    monkeypatch.setattr(wm, "previous_day", lambda now=None: date(2026, 11, 13))
+    fake = CpuHttp()
+    monkeypatch.setattr(requests, "Session", lambda: fake)
+    csv_path, out = tmp_path / "worker_cpu.csv", tmp_path / "out" / "summary.json"
+    args = ["worker-metrics", "--account", CPU_ACCOUNT, "--csv", str(csv_path), "--out", str(out)]
+    assert nightly.main(args) == 0
+    summary = json.loads(out.read_text(encoding="utf-8"))
+    assert summary["state"] == "ok" and len(summary["days_fetched"]) == 13  # 2026-11-01 to 2026-11-13
+    assert summary["yesterday"] == {"date": "2026-11-13", "requests": 1000, "cpu_ms": 9000, "mean_cpu_ms": 9.0,
+                                    "startup_share": 0.333}
+    assert len(fake.posts) == 2 and fake.closed  # a week per query
+    assert fake.posts[0]["json"]["variables"]["script"] == "lmia-watch"
+    printed = capsys.readouterr().out
+    assert printed == "worker-metrics: ok (13 days fetched)\n"
+    assert CPU_TOKEN not in printed + caplog.text + out.read_text(encoding="utf-8") + csv_path.read_text(encoding="utf-8")
+
+    # Failed: exit 1, and the summary is still written for the run status.
+    monkeypatch.setattr(requests, "Session", lambda: CpuHttp(status=500))
+    assert nightly.main(["worker-metrics", "--account", CPU_ACCOUNT, "--csv", str(tmp_path / "other.csv"),
+                         "--out", str(out)]) == 1
+    failed = json.loads(out.read_text(encoding="utf-8"))
+    assert failed["state"] == "failed" and "HTTP 500" in failed["detail"]
+    assert CPU_TOKEN not in capsys.readouterr().out + caplog.text
+
+    # No token: no credentials, exit 0, nothing asked.
+    monkeypatch.delenv(wm.TOKEN_ENV)
+    idle = CpuHttp()
+    monkeypatch.setattr(requests, "Session", lambda: idle)
+    assert nightly.main(args) == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["state"] == "no credentials" and idle.posts == []
+
+
+def test_status_carries_the_worker_metrics_and_last_run_gets_its_line(tmp_path, capsys):
+    db = tmp_path / "none.sqlite"
+    assert nightly.run_status(db, None, None, None, {})["worker_metrics"] == {"state": "not run"}
+    # Never a stage: a failure alerts without marking the data refresh failed.
+    failed = nightly.run_status(db, None, None, None, {}, worker_metrics={"state": "failed", "detail": "HTTP 500"})
+    assert failed["worker_metrics"]["state"] == "failed"
+    assert "worker" not in json.dumps(failed["stages"]).lower()
+
+    (tmp_path / "summary.json").write_text(json.dumps(CPU_SUMMARY), encoding="utf-8")
+    out = tmp_path / "status.json"
+    assert nightly.main(["status", "--db", str(db), "--worker-metrics", str(tmp_path / "summary.json"),
+                         "--out", str(out)]) == 0
+    status = json.loads(out.read_text(encoding="utf-8"))
+    assert status["worker_metrics"]["state"] == "ok"
+    assert status["worker_metrics"]["month_projection_cpu_ms"] == 48_200_000
+    capsys.readouterr()
+    assert nightly.main(["worker-cpu-line", "--status", str(out)]) == 0
+    assert capsys.readouterr().out == (
+        "Worker CPU: 2026-11-13: 2,305,908 ms over 238,037 requests (9.7 ms mean, start-up 32%); "
+        "month to date 26.1M of 30M included, projection 48.2M\n")
+
+    # The step did not run, or the status is missing: nothing for LAST_RUN.md.
+    assert nightly.main(["status", "--db", str(db), "--out", str(out)]) == 0
+    capsys.readouterr()
+    assert nightly.main(["worker-cpu-line", "--status", str(out)]) == 0
+    assert nightly.main(["worker-cpu-line", "--status", str(tmp_path / "absent.json")]) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_the_workflow_records_the_worker_cpu_after_the_roll_up_and_saves_the_file():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    names = re.findall(r"^      - name: (.+)$", text, re.MULTILINE)
+    step = names.index("Record the Worker's CPU time (only when CLOUDFLARE_ANALYTICS_TOKEN is set)")
+    assert names.index("Roll up the audience counts (only when CLOUDFLARE_ANALYTICS_TOKEN is set)") < step
+    assert step < names.index("Write the monthly audience report (the first run of a month)")
+    block = text.split("- name: Record the Worker's CPU time", 1)[1].split("\n      - ", 1)[0]
+    assert "if: ${{ !cancelled() }}" in block and "continue-on-error: true" in block
+    assert "CLOUDFLARE_ANALYTICS_TOKEN: ${{ secrets.CLOUDFLARE_ANALYTICS_TOKEN }}" in block
+    assert 'failed "the step stopped before it finished"' in block  # before anything else can stop it
+    assert 'r2 object get --remote "$BUCKET/metrics/worker_cpu.csv"' in block
+    assert 'put "$BUCKET/metrics/worker_cpu.csv" "$out/worker_cpu.csv"' in block
+    assert ('python -m lmia_pipeline.nightly worker-metrics --account "$CLOUDFLARE_ACCOUNT_ID" --script lmia-watch \\\n'
+            '            --csv "$out/worker_cpu.csv" --out "$out/result.json"') in block
+    for line in block.splitlines():
+        if "r2 object" in line:
+            assert "--remote" in line, line
+    assert "--worker-metrics data/out/worker_metrics/summary.json" in text
+    assert "--step \"worker_metrics=" not in text  # never a step outcome, so never a retry
+    report = text.split("- name: Write the monthly audience report", 1)[1].split("\n      - ", 1)[0]
+    assert 'fetch metrics/worker_cpu.csv "$out/worker_cpu.csv"' in report
+    assert '--worker-cpu "$out/worker_cpu.csv"' in report
+    record = text.split("- name: Record the run so the schedule stays enabled", 1)[1].split("\n      - ", 1)[0]
+    assert ("python -m lmia_pipeline.nightly worker-cpu-line --status data/out/status.json "
+            "> data/out/worker_cpu_line.txt 2>/dev/null || true") in record
+    assert "cat data/out/worker_cpu_line.txt >> LAST_RUN.md" in record

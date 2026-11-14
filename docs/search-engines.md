@@ -237,9 +237,10 @@ on the other.
 
 The counts are read day to day and kept as a lasting record of the site's
 audience. Cloudflare's dashboards show a window and keep nothing, so the
-nightly run keeps three files in R2: the daily roll-up of the Worker's own
-counts, Search Console's daily figures, and a report per month. Since
-2026-10-30 every count separates people from crawlers.
+nightly run keeps four files in R2: the daily roll-up of the Worker's own
+counts, Search Console's daily figures, a report per month, and the
+Worker's CPU time per day. Since 2026-10-30 every count separates people
+from crawlers.
 
 ### What one data point holds
 
@@ -256,12 +257,14 @@ counts, Search Console's daily figures, and a report per month. Since
 | `blob8` | `bot` or `human` (from 2026-10-30) | `human` |
 | `blob9` | people only: `desktop`, `mobile` or `tablet`, read from the user agent; empty for a bot | `mobile` |
 | `blob10` | people only: the daily visitor code, 16 hex characters; empty for a bot and while `VIEWS_SALT_KEY` is not set | `79b509108f501ba3` |
+| `blob11` | the page cache's state for the response: `hit`, `miss`, or empty when the cache did not consider the request | `hit` |
 | `double1` | the status code | `200` |
 | `double2` | feeds only: the subscriber count the feed reader stated, 0 when none | `12` |
 
 The positions never move: the roll-up reads older days with the same
-columns, and a point written before 2026-10-30 reads back with empty strings
-in `blob7` to `blob10`.
+columns, a point written before 2026-10-30 reads back with empty strings
+in `blob7` to `blob10`, and one written before the page cache with an empty
+`blob11`.
 
 A path that matches no route is stored as `other`, never as written, since a
 mistyped or pasted address could hold anything. Downloads keep their file
@@ -356,7 +359,8 @@ nothing else:
 
 Until the secret exists, the step logs "no analytics token; nothing rolled
 up" and the run status reads `views_rollup: no token`. The first night with
-the secret rolls up every day Analytics Engine still holds.
+the secret rolls up every day Analytics Engine still holds. The Worker CPU
+record (below) reads with the same token.
 
 ### What the nightly run keeps in R2
 
@@ -366,9 +370,10 @@ It asks the SQL API for every finished UTC day after the newest one in the
 summary (normally only yesterday; on the first night, the last 90 days), so
 a night that fails is caught up by the next. A day with no data points at all
 is not written and is asked again the next night. Each day costs one query,
-and six more when it has data points (counts, feeds, page views by bot flag,
-people's page views by route, distinct visitor codes, distinct codes with a
-page view). Files in the `lmia-watch-data` bucket:
+and seven more when it has data points (counts, feeds, page views by bot
+flag, people's page views by route, distinct visitor codes, distinct codes
+with a page view, page views by page cache state). Files in the
+`lmia-watch-data` bucket:
 
 | Key | What it is |
 |---|---|
@@ -376,6 +381,7 @@ page view). Files in the `lmia-watch-data` bucket:
 | `views/summary.csv` | one row per day, every day kept so far |
 | `views/search_console.csv` | one row per day of Search Console figures (below) |
 | `views/report-YYYY-MM.md` | the monthly report (below) |
+| `metrics/worker_cpu.csv` | one row per day of the Worker's CPU time (below, "Worker CPU metrics") |
 
 The summary is downloaded, extended and uploaded again each night. A download
 that fails for any reason other than "does not exist" stops the step, and a
@@ -385,9 +391,10 @@ rebuilt from the day files. A summary written before a column existed reads
 with that column blank.
 
 A day file, header
-`date,section,route,kind,lang,country,referrer,status,feed,responses,subscribers,agent,device`
-(files written before 2026-10-30 lack the last two), has five kinds of row,
-named by `section`:
+`date,section,route,kind,lang,country,referrer,status,feed,responses,subscribers,agent,device,cache`
+(files written before 2026-10-30 lack `agent` and `device`, and files
+written before the page cache lack `cache`), has six kinds of row, named by
+`section`:
 
 | `section` | Columns filled | Meaning |
 |---|---|---|
@@ -396,6 +403,7 @@ named by `section`:
 | `count` | `route` to `status`, `responses` | responses for one combination of route template, kind, language, country, referring host and status |
 | `feed` | `feed`, `responses`, `subscribers` | one feed file: the day's polls, and the largest subscriber count any reader stated (0 when none did); `feed` is empty for polls of a feed path with no file |
 | `audience` | `agent`, `country`, `device`, `lang`, `responses` | page views below status 400 for one combination of bot flag, country, device and language; `agent` is empty for points written before the flag |
+| `page_cache` | `cache`, `responses` | page views below status 400 in one page cache state: `hit`, `miss`, or empty (not considered, or written before the cache) |
 
 `status` is the HTTP status code; `country` and `referrer` are empty when the
 request carried none. Counts come from `SUM(_sample_interval)`, so they are
@@ -404,7 +412,7 @@ distinct counts of visitor codes would undercount if it ever sampled (this
 site's volume is far below where it starts).
 
 The summary, header
-`date,responses,pages,api,downloads,forms,feeds,other,feed_subscribers,bluesky_followers,top_routes,human_pages,bot_pages,unique_visitors,human_visits,human_by_country,human_by_device,human_by_lang,human_by_route,x_followers,employers,records`:
+`date,responses,pages,api,downloads,forms,feeds,other,feed_subscribers,bluesky_followers,top_routes,human_pages,bot_pages,unique_visitors,human_visits,human_by_country,human_by_device,human_by_lang,human_by_route,x_followers,employers,records,page_cache_hits,page_cache_misses`:
 
 | Column | Meaning |
 |---|---|
@@ -425,15 +433,20 @@ The summary, header
 | `human_by_route` | people's page views by route template, every route |
 | `x_followers` | the X account's follower count, read once a month on the night that rolls up the month's last day, only when X posting is enabled (`X_POST_ENABLED` and the four X secrets); one read, billed per use |
 | `employers`, `records` | the site's counts from tonight's `stats.json` (employers; rows on ESDC's positive and negative lists), on the row for the day before |
+| `page_cache_hits` | page views (kind `page`, status below 400) the Worker answered from its page cache (`blob11` `hit`) |
+| `page_cache_misses` | page views (kind `page`, status below 400) the page cache could have served and that were rendered instead (`blob11` `miss`) |
 
 Blanks are deliberate and never mean zero. The eight people and bot columns
 are blank on any day on which a page view carries no bot flag (every day
 before 2026-10-30, and the day itself, which mixes points from before and
 after the deploy). `unique_visitors` and `human_visits` are also blank on any
 day on which a person's request carried no visitor code (no `VIEWS_SALT_KEY`,
-or the secret set part way through the day). The follower, employer and
-record readings are taken on the night, so a day rolled up again keeps the
-reading it had.
+or the secret set part way through the day). The two page cache columns
+are blank on any day on which no page view was a hit or a miss: every day
+before the Worker wrote `blob11`, the same as a column that did not exist
+yet. On the day the cache was deployed they count only the part of the day
+after the deploy. The follower, employer and record readings are taken on
+the night, so a day rolled up again keeps the reading it had.
 
 Nothing in either file identifies a visitor: the queries can read only what
 the Worker writes, never ask for a visitor code itself, and the roll-up
@@ -543,8 +556,9 @@ The report is plain markdown: a table of the month and the three before it
 (days counted, page views by people, unique visitors summed by day, visits,
 Canada's share, the device split, search clicks, impressions and position,
 feed subscribers, Bluesky and X followers, employers and records), the
-month's top ten pages by people, and the definitions of each figure. A
-figure that was not counted reads `n/a`. Unique visitors are summed over the
+month's top ten pages by people, a Worker CPU table for the same four
+months (below), and the definitions of each figure. A figure that was not
+counted reads `n/a`. Unique visitors are summed over the
 month's days ("visitor-days"), since the code changes daily: a person who
 came on three days counts three times.
 
@@ -553,7 +567,73 @@ wrote it. Outcomes, as `views_report`: `written`, `not due` (the report
 exists), `waiting`, `no data` (the summary holds no day of the month), or
 `failed` (an attention item and a watchdog email; the next run tries again).
 To write one by hand from downloaded files:
-`python -m lmia_pipeline views-report --month 2026-11 --summary summary.csv --search search_console.csv --out .`
+`python -m lmia_pipeline views-report --month 2026-11 --summary summary.csv --search search_console.csv --worker-cpu worker_cpu.csv --out .`
+
+### Worker CPU metrics
+
+The Worker runs on the Workers Paid plan, whose monthly allowance is 30
+million CPU milliseconds (`WORKERS_CPU_INCLUDED_MS` in
+`pipeline/lmia_pipeline/worker_metrics.py`); CPU time beyond it is billed
+per additional million milliseconds. The allowance covers every Worker on
+the account, and this record counts the `lmia-watch` Worker alone. The
+nightly step "Record the Worker's CPU time" keeps one row per finished UTC
+day so the effect of changes to the Worker can be followed month by month.
+
+It runs `python -m lmia_pipeline.nightly worker-metrics` after the audience
+roll-up, with the same `CLOUDFLARE_ANALYTICS_TOKEN`. That command asks the
+GraphQL Analytics API (`api.cloudflare.com/client/v4/graphql`) for the
+account-level dataset `workersInvocationsAdaptive`, filtered on the script
+name and grouped by date, for every day after the newest row in
+`metrics/worker_cpu.csv`: from 2026-11-01 on the first night, so the figures
+from before the optimisations are kept, up to and including yesterday.
+Today's partial day is never asked for. Cloudflare keeps about three months
+of this dataset and answers at most a week per query, so a catch-up never
+reaches further back than 90 days and is asked a week at a time. A day
+Cloudflare has no figures for is not written. The file is downloaded,
+merged by date (a newer row replaces an older one for the same day) and
+uploaded again; a download that fails for any reason other than "does not
+exist" stops the step, and a file that cannot be read is never replaced.
+
+Header
+`date,requests,errors,subrequests,cpu_ms,startup_cpu_ms,mean_cpu_ms,startup_share,cpu_p50_ms,cpu_p90_ms,cpu_p99_ms,startup_p50_ms,memory_p50_mb,body_bytes,month_to_date_cpu_ms,month_projection_cpu_ms,included_cpu_ms`:
+
+| Column | Meaning |
+|---|---|
+| `date` | the UTC day |
+| `requests`, `errors`, `subrequests` | the Worker's invocations, those that ended in an error, and the subrequests it made |
+| `cpu_ms`, `startup_cpu_ms` | CPU time and start-up CPU time, summed over the day, in milliseconds (Cloudflare gives microseconds) |
+| `mean_cpu_ms` | `cpu_ms` over `requests`, three decimals |
+| `startup_share` | `startup_cpu_ms` over `cpu_ms`, three decimals |
+| `cpu_p50_ms`, `cpu_p90_ms`, `cpu_p99_ms` | the median, 90th and 99th percentile of CPU time per request, in milliseconds |
+| `startup_p50_ms` | the median start-up CPU time, in milliseconds |
+| `memory_p50_mb` | the median memory in use, in MiB (1,048,576 bytes) |
+| `body_bytes` | response body bytes, summed |
+| `month_to_date_cpu_ms` | the sum of `cpu_ms` over the calendar month's rows up to and including the day |
+| `month_projection_cpu_ms` | the month to date scaled to the whole month by the calendar days elapsed (on the 13th of a 30-day month, times 30 over 13) |
+| `included_cpu_ms` | the plan's monthly allowance when the row was written |
+
+The derived columns are computed again over the whole file on every write,
+so a replaced row carries into the rest of its month. The figures are
+Cloudflare's adaptive estimates, the same as the dashboard's.
+
+Outcomes, as `worker_metrics` in the run status (a JSON object: `state`,
+`detail`, the days fetched, yesterday's row, the month to date, the
+projection and the allowance): state `ok`, `no credentials` (no token or no
+account id; nothing is asked) or `failed` (the API, the file or an upload
+failed; the next night catches up). Only `failed` is an attention item; the
+Worker's daily check does not read it. LAST_RUN.md gets one line, for
+example "Worker CPU: 2026-11-13: 2,305,908 ms over 238,037 requests (9.7 ms
+mean, start-up 32%); month to date 26.1M of 30M included, projection
+48.2M".
+
+The monthly report's Worker CPU table gives each month's CPU time, the mean
+per request, the start-up share, the days above and at or below the
+allowance's daily pace (the allowance divided by the days in the month),
+and the page cache's hit rate: `page_cache_hits` over hits and misses, from
+the two page cache columns of `views/summary.csv`.
+
+To read the file: `npx wrangler r2 object get --remote lmia-watch-data/metrics/worker_cpu.csv --file worker_cpu.csv`
+from `site/`.
 
 ### The dashboard
 

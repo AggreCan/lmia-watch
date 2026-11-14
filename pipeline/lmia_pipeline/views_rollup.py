@@ -11,11 +11,12 @@ What a stored row can hold: only what the Worker writes, which is the route
 template, the kind of request, the page language, the country code
 Cloudflare's edge attaches, the referring site's host name, the status, for
 an Atom feed the file name and the subscriber count a feed reader stated,
-and since 2026-10-30 whether the request came from a bot or a person and the
-person's device class. The Worker never writes an IP address, a user agent,
-a cookie, a full referrer or a raw path, so no query can read one back. Each
-value read is checked against the shape the Worker writes before it reaches
-a file, so a row cannot carry more than that even if the dataset ever did.
+since 2026-10-30 whether the request came from a bot or a person and the
+person's device class, and for a page view the page cache's state. The
+Worker never writes an IP address, a user agent, a cookie, a full referrer
+or a raw path, so no query can read one back. Each value read is checked
+against the shape the Worker writes before it reaches a file, so a row
+cannot carry more than that even if the dataset ever did.
 
 People and bots (since 2026-10-30): the summary's human_* columns count page
 views below status 400 by requests the Worker marked "human", bot_pages
@@ -28,6 +29,15 @@ would undercount; a day on which any person's request carries no code (no
 VIEWS_SALT_KEY, or the secret set part way through the day) gets blank
 visitor columns. A blank means "not counted", a 0 means none.
 
+The page cache: blob11 holds the Worker's page cache state for a page
+view, "hit", "miss" or "" (the cache did not consider the request).
+page_cache_hits and page_cache_misses count page views below status 400
+in each state. A day on which no page view is a hit or a miss gets blanks
+in both, the same as a column that did not exist yet: the days before the
+Worker wrote blob11 (their points read back with an empty blob11), and any
+day the cache considered nothing. On the day the cache was deployed the two
+count only the part of the day after the deploy.
+
 Why a day is caught up rather than only yesterday: a night whose query fails
 leaves a gap, and nothing should need a manual step to fill it. Each night
 rolls up every day after the newest one in the summary, back to the three
@@ -35,7 +45,7 @@ months Analytics Engine still holds (all of them on the first night, which
 keeps the counts written before the roll-up existed). A day with no data
 points at all is not written: an empty day means the counting failed, not
 that nobody came, and the next night asks again. Queries are per day: one
-for the totals by kind, and six more only for a day that has data points.
+for the totals by kind, and seven more only for a day that has data points.
 
 Why "failed" never stops the run: the counts are a record of the audience,
 not part of the data refresh. The step reports the outcome in the run status
@@ -88,14 +98,14 @@ SUMMARY = "summary.csv"
 ROLLED_UP = "rolled_up.txt"
 
 DAY_HEADER = ["date", "section", "route", "kind", "lang", "country", "referrer", "status", "feed",
-              "responses", "subscribers", "agent", "device"]
+              "responses", "subscribers", "agent", "device", "cache"]
 # New columns go at the end: a summary written before them still reads, with
 # the new columns blank on its rows.
 SUMMARY_HEADER = ["date", "responses", "pages", "api", "downloads", "forms", "feeds", "other",
                   "feed_subscribers", "bluesky_followers", "top_routes",
                   "human_pages", "bot_pages", "unique_visitors", "human_visits",
                   "human_by_country", "human_by_device", "human_by_lang", "human_by_route",
-                  "x_followers", "employers", "records"]
+                  "x_followers", "employers", "records", "page_cache_hits", "page_cache_misses"]
 # The columns that are blank on a day counted before the bot flag.
 AUDIENCE_COLUMNS = ["human_pages", "bot_pages", "unique_visitors", "human_visits",
                     "human_by_country", "human_by_device", "human_by_lang", "human_by_route"]
@@ -105,6 +115,7 @@ READINGS = ["bluesky_followers", "x_followers", "employers", "records"]
 KIND_COLUMNS = {"page": "pages", "api": "api", "download": "downloads", "form": "forms", "feed": "feeds"}
 KINDS = {"page", "api", "download", "form", "hook", "file", "feed", "other"}
 AGENTS = {"bot", "human"}
+CACHE_STATES = {"hit", "miss"}
 DEVICES = {"desktop", "mobile", "tablet"}
 TOP_ROUTES = 5
 TOP_COUNTRIES = 10
@@ -194,6 +205,13 @@ def visits_sql(day: date) -> str:
             f"WHERE blob8 = 'human' AND blob2 = 'page' AND blob10 != '' AND {_where(day)} FORMAT JSON")
 
 
+def page_cache_sql(day: date) -> str:
+    # Page views below 400 by page cache state (blob11); points written
+    # before the cache answer with an empty state.
+    return (f"SELECT blob11 AS cache, SUM(_sample_interval) AS pages FROM {DATASET} "
+            f"WHERE blob2 = 'page' AND double1 < 400 AND {_where(day)} GROUP BY cache ORDER BY cache FORMAT JSON")
+
+
 # -- the API ------------------------------------------------------------------
 
 
@@ -281,6 +299,7 @@ class Day:
     visitors: int | None = None   # distinct codes over people's requests
     uncoded: int = 0              # people's requests without a code
     visits: int | None = None     # distinct codes with a page view
+    page_cache: dict[str, int] = field(default_factory=dict)  # "hit", "miss" or "" -> page views below 400
 
     @property
     def total(self) -> int:
@@ -346,7 +365,8 @@ def clean_audience_key(row: dict[str, Any]) -> AudienceKey:
 
 def build_day(day: date, kinds: list[dict], counts: list[dict], feeds: list[dict],
               audience: list[dict] | None = None, human_routes: list[dict] | None = None,
-              visitors: list[dict] | None = None, visits: list[dict] | None = None) -> Day:
+              visitors: list[dict] | None = None, visits: list[dict] | None = None,
+              page_cache: list[dict] | None = None) -> Day:
     """One day from the answers. Rows that clean to the same key are added together."""
     out = Day(day)
     for row in kinds:
@@ -376,12 +396,16 @@ def build_day(day: date, kinds: list[dict], counts: list[dict], feeds: list[dict
         out.uncoded = 1 if uncoded is None else uncoded
     if visits is not None and len(visits) == 1:
         out.visits = _count_or_none(visits[0].get("visits"))
+    for row in page_cache or []:
+        state = _text(row.get("cache"))
+        state = state if state in CACHE_STATES else ""
+        out.page_cache[state] = out.page_cache.get(state, 0) + _count(row.get("pages"))
     return out
 
 
 def day_rows(d: Day) -> list[dict[str, Any]]:
     """The day file's rows: the total, the total per kind, every grouped count, every feed,
-    and the page views by bot flag, country, device and language."""
+    the page views by bot flag, country, device and language, and the page views by page cache state."""
     stamp = d.day.isoformat()
     blank = dict.fromkeys(DAY_HEADER, "")
     rows: list[dict[str, Any]] = [dict(blank, date=stamp, section="total", responses=d.total)]
@@ -397,6 +421,9 @@ def day_rows(d: Day) -> list[dict[str, Any]]:
     for (agent, country, device, lang), n in sorted(d.audience.items(), key=lambda kv: (-kv[1], kv[0])):
         rows.append(dict(blank, date=stamp, section="audience", kind="page", agent=agent, country=country,
                          device=device, lang=lang, responses=n))
+    for state in sorted(d.page_cache):
+        rows.append(dict(blank, date=stamp, section="page_cache", kind="page", cache=state,
+                         responses=d.page_cache[state]))
     return rows
 
 
@@ -447,6 +474,14 @@ def audience_columns(d: Day) -> dict[str, Any]:
     return out
 
 
+def page_cache_columns(d: Day) -> dict[str, Any]:
+    """Hits and misses, or blanks when no page view of the day was either."""
+    hits, misses = d.page_cache.get("hit", 0), d.page_cache.get("miss", 0)
+    if hits + misses == 0:
+        return {"page_cache_hits": "", "page_cache_misses": ""}
+    return {"page_cache_hits": hits, "page_cache_misses": misses}
+
+
 def summary_row(d: Day, followers: int | None = None, *, x_followers: int | None = None,
                 site_counts: dict[str, int] | None = None) -> dict[str, Any]:
     row: dict[str, Any] = dict.fromkeys(SUMMARY_HEADER, 0)
@@ -464,6 +499,7 @@ def summary_row(d: Day, followers: int | None = None, *, x_followers: int | None
     counts = site_counts or {}
     row["employers"] = counts.get("employers", "")
     row["records"] = counts.get("records", "")
+    row.update(page_cache_columns(d))
     return row
 
 
@@ -682,6 +718,7 @@ def roll_day(http: Any, account: str, token: str, day: date) -> Day | None:
         human_routes=query(http, account, token, human_routes_sql(day)),
         visitors=query(http, account, token, visitors_sql(day)),
         visits=query(http, account, token, visits_sql(day)),
+        page_cache=query(http, account, token, page_cache_sql(day)),
     )
     if d.truncated:
         log.warning("views: %s has more than %d grouped rows; the smallest are left out of the day file "

@@ -6,6 +6,7 @@ import json
 from datetime import date
 
 from lmia_pipeline import cli, nightly, resilience, search_console as sc, views_report as vrep, views_rollup as vr
+from lmia_pipeline import worker_metrics as wm
 
 
 def summary_row(day: str, **values) -> dict:
@@ -162,3 +163,79 @@ def test_the_run_status_carries_the_report_and_only_failed_needs_attention(tmp_p
     assert nightly.main(["status", "--db", str(db), "--views-report-outcome", str(tmp_path / "report.txt"),
                          "--out", str(out)]) == 0
     assert json.loads(out.read_text(encoding="utf-8"))["views_report"] == "not due"
+
+
+# -- the Worker CPU table ---------------------------------------------------------
+
+
+def worker_row(day: str, requests: int, cpu_ms: int, startup_ms: int) -> dict:
+    row = dict.fromkeys(wm.HEADER, "")
+    row.update(date=day, requests=str(requests), errors="0", subrequests="0", cpu_ms=str(cpu_ms),
+               startup_cpu_ms=str(startup_ms))
+    return row
+
+
+WORKER = [
+    worker_row("2026-09-30", 50_000, 400_000, 100_000),
+    # October's even share of 30,000,000 ms is 967,742 a day: the 29th and 31st are above it.
+    worker_row("2026-10-29", 100_000, 1_200_000, 300_000),
+    worker_row("2026-10-30", 100_000, 900_000, 270_000),
+    worker_row("2026-10-31", 200_000, 1_000_000, 250_000),
+]
+
+
+def write_worker(tmp_path, rows=WORKER):
+    path = tmp_path / "worker_cpu.csv"
+    wm.write_file(path, wm.derive(wm.merge([], rows)))
+    return path
+
+
+def with_cache(rows):
+    # The page cache's columns on the 30th and 31st only, as if it was deployed on the 30th.
+    cache = {"2026-10-30": (60, 40), "2026-10-31": (90, 10)}
+    return [dict(r, page_cache_hits=cache[r["date"]][0], page_cache_misses=cache[r["date"]][1])
+            if r["date"] in cache else r for r in rows]
+
+
+def test_the_worker_cpu_table_sums_the_month_and_counts_the_days_against_the_pace(tmp_path):
+    summary, search = write_files(tmp_path, rows=with_cache(ROWS))
+    worker = write_worker(tmp_path)
+    out = tmp_path / "out"
+    assert vrep.run(out, "2026-10", date(2026, 11, 1), summary, search, worker) == "written"
+    text = (out / "report-2026-10.md").read_text(encoding="utf-8")
+    section = text.split("## Worker CPU\n\n", 1)[1].split("## Definitions", 1)[0]
+    assert section.startswith("| Figure | 2026-07 | 2026-08 | 2026-09 | 2026-10 |")
+    assert table_row(section, "Days with CPU figures") == ["0 of 31", "0 of 31", "1 of 30", "3 of 31"]
+    assert table_row(section, "Worker requests") == ["n/a", "n/a", "50,000", "400,000"]
+    assert table_row(section, "CPU time (ms)") == ["n/a", "n/a", "400,000", "3,100,000"]
+    assert table_row(section, "Mean CPU time per request (ms)") == ["n/a", "n/a", "8.00", "7.75"]
+    assert table_row(section, "Start-up share of CPU time")[-1] == "26.5%"  # 820,000 of 3,100,000
+    assert table_row(section, "Included CPU time (ms)") == ["n/a", "n/a", "30,000,000", "30,000,000"]
+    assert table_row(section, "Days above the included pace")[-1] == "2"
+    assert table_row(section, "Days at or below the included pace")[-1] == "1"
+    assert table_row(section, "Days with page cache figures") == ["0 of 31", "0 of 31", "0 of 30", "2 of 31"]
+    assert table_row(section, "Page cache hit rate") == ["n/a", "n/a", "n/a", "75.0%"]  # 150 of 200
+    assert "- Page cache hit rate:" in text and "- Included CPU time:" in text
+    for dash in (chr(0x2014), chr(0x2013)):
+        assert dash not in text
+
+
+def test_without_the_worker_file_or_with_a_bad_one_the_cpu_rows_read_not_counted(tmp_path):
+    summary, search = write_files(tmp_path)
+    bad = tmp_path / "bad.csv"
+    bad.write_text("date,visitor_ip\n2026-10-01,x\n", encoding="utf-8")
+    for worker in (None, tmp_path / "absent.csv", bad):
+        out = tmp_path / "out"
+        assert vrep.run(out, "2026-10", date(2026, 11, 1), summary, search, worker) == "written", worker
+        text = (out / "report-2026-10.md").read_text(encoding="utf-8")
+        assert table_row(text, "CPU time (ms)") == ["n/a"] * 4
+        assert table_row(text, "Page cache hit rate") == ["n/a"] * 4
+
+
+def test_the_command_takes_the_worker_file(tmp_path):
+    summary, search = write_files(tmp_path)
+    worker = write_worker(tmp_path)
+    out = tmp_path / "out"
+    assert cli.main(["views-report", "--summary", str(summary), "--search", str(search), "--worker-cpu", str(worker),
+                     "--out", str(out), "--today", "2026-11-01"]) == 0
+    assert table_row((out / "report-2026-10.md").read_text(encoding="utf-8"), "CPU time (ms)")[-1] == "3,100,000"

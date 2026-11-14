@@ -21,6 +21,12 @@ a person who came on three days counts three times. The same holds for
 visits. Levels (followers, feed subscribers, employers, records) are not
 summed: each month shows the last reading in it (the largest daily figure
 for feed subscribers).
+
+The Worker's CPU time: when `metrics/worker_cpu.csv` (worker_metrics.py)
+is given, a second table puts the same four months side by side: CPU time,
+the mean per request, the start-up share, the days above and below the
+daily pace of the plan's included CPU time, and the page cache's hit rate
+from the summary's page_cache_hits and page_cache_misses.
 """
 
 from __future__ import annotations
@@ -34,6 +40,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from .views_rollup import SummaryError, read_summary
+from .worker_metrics import MetricsFileError
+from .worker_metrics import read_file as read_worker_file
 
 log = logging.getLogger(__name__)
 
@@ -113,11 +121,24 @@ class Month:
     clicks: int = 0
     impressions: int = 0
     position_weight: float = 0.0      # sum of position x impressions
+    cache_days: int = 0               # days with page cache figures
+    cache_hits: int = 0
+    cache_misses: int = 0
+    cpu_days: int = 0                 # days in metrics/worker_cpu.csv
+    requests: int = 0
+    cpu_ms: int = 0
+    startup_ms: int = 0
+    startup_days: int = 0             # days with a start-up figure
+    included_ms: int | None = None    # the last row's included CPU time
+    over_pace: int = 0                # days above included / days in the month
+    under_pace: int = 0
 
 
-def gather(month: str, summary: list[dict[str, str]], search: list[dict[str, str]]) -> Month:
+def gather(month: str, summary: list[dict[str, str]], search: list[dict[str, str]],
+           worker: list[dict[str, str]] | None = None) -> Month:
     first, last = month_bounds(month)
     m = Month(month)
+    days_in_month = (last - first).days + 1
     for row in sorted(summary, key=lambda r: r["date"]):
         if not first.isoformat() <= row["date"] <= last.isoformat():
             continue
@@ -146,6 +167,34 @@ def gather(month: str, summary: list[dict[str, str]], search: list[dict[str, str
             value = _int(row.get(column))
             if value is not None:
                 setattr(m, attr, value)  # rows run oldest first, so the last reading stands
+        hits, misses = _int(row.get("page_cache_hits")), _int(row.get("page_cache_misses"))
+        if hits is not None and misses is not None:
+            m.cache_days += 1
+            m.cache_hits += hits
+            m.cache_misses += misses
+    for row in sorted(worker or [], key=lambda r: r.get("date") or ""):
+        if not first.isoformat() <= (row.get("date") or "") <= last.isoformat():
+            continue
+        requests, cpu = _int(row.get("requests")), _int(row.get("cpu_ms"))
+        if requests is None or cpu is None:
+            continue
+        m.cpu_days += 1
+        m.requests += requests
+        m.cpu_ms += cpu
+        startup = _int(row.get("startup_cpu_ms"))
+        if startup is not None:
+            m.startup_days += 1
+            m.startup_ms += startup
+        included = _int(row.get("included_cpu_ms"))
+        if included is not None:
+            m.included_ms = included
+        if included:
+            # A day above an even share of the month's included CPU time
+            # pushes the month toward billed time.
+            if cpu * days_in_month > included:
+                m.over_pace += 1
+            else:
+                m.under_pace += 1
     for row in search:
         if not first.isoformat() <= row["date"] <= last.isoformat():
             continue
@@ -203,6 +252,20 @@ def render(month: str, months: list[Month], written: date) -> str:
         line("Records (last reading)", [_n(m.records) for m in months]),
     ])
 
+    cpu = [m.cpu_days > 0 for m in months]
+    worker = head + "".join([
+        line("Days with CPU figures", [_days(m.cpu_days, m.month) for m in months]),
+        line("Worker requests", [_n(m.requests) if ok else NA for m, ok in zip(months, cpu)]),
+        line("CPU time (ms)", [_n(m.cpu_ms) if ok else NA for m, ok in zip(months, cpu)]),
+        line("Mean CPU time per request (ms)", [f"{m.cpu_ms / m.requests:.2f}" if m.requests else NA for m in months]),
+        line("Start-up share of CPU time", [_share(m.startup_ms, m.cpu_ms) if m.startup_days else NA for m in months]),
+        line("Included CPU time (ms)", [_n(m.included_ms) for m in months]),
+        line("Days above the included pace", [_n(m.over_pace) if ok else NA for m, ok in zip(months, cpu)]),
+        line("Days at or below the included pace", [_n(m.under_pace) if ok else NA for m, ok in zip(months, cpu)]),
+        line("Days with page cache figures", [_days(m.cache_days, m.month) for m in months]),
+        line("Page cache hit rate", [_share(m.cache_hits, m.cache_hits + m.cache_misses) for m in months]),
+    ])
+
     current = months[-1]
     top = sorted(current.routes.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_PAGES]
     total = sum(current.routes.values())
@@ -212,10 +275,12 @@ def render(month: str, months: list[Month], written: date) -> str:
 
     return (
         f"# LMIA Watch audience report, {month}\n\n"
-        f"Written {written.isoformat()} from views/summary.csv and views/search_console.csv in R2. "
+        f"Written {written.isoformat()} from views/summary.csv, views/search_console.csv and "
+        "metrics/worker_cpu.csv in R2. "
         "Months are UTC calendar months. n/a means not counted.\n\n"
         f"## The month and the three before it\n\n{table}\n"
         f"## Top pages by people, {month}\n\n{pages}\n"
+        f"## Worker CPU\n\n{worker}\n"
         "## Definitions\n\n"
         "- Days in the roll-up: days with a row in views/summary.csv (a day the Worker counted nothing has none).\n"
         "- Page views by people: responses to page routes below status 400 that the Worker marked human "
@@ -234,6 +299,13 @@ def render(month: str, months: list[Month], written: date) -> str:
         "- Followers, employers, records: the last reading taken in the month. Followers are read by the nightly "
         "run (X once a month, on the last day); employers and records are the site's counts after the nightly run "
         "(records: rows on ESDC's positive and negative lists).\n"
+        "- Worker CPU: from metrics/worker_cpu.csv, Cloudflare's GraphQL Analytics figures for the Worker, one row "
+        "per UTC day, kept from 2026-11-01. Requests and CPU time are summed over the days with figures; the mean is "
+        "the month's CPU time over its requests; the start-up share is start-up CPU time over CPU time.\n"
+        "- Included CPU time: the plan's monthly allowance as recorded on the month's rows. A day is above the "
+        "included pace when its CPU time is more than the allowance divided by the days in the month.\n"
+        "- Page cache hit rate: page views below status 400 served from the Worker's page cache, as a share of those "
+        "it could have served (hits and misses), on the days with page cache figures in views/summary.csv.\n"
     )
 
 
@@ -254,7 +326,20 @@ def _read_search(path: Path | None) -> list[dict[str, str]]:
     return [r for r in csv.DictReader(io.StringIO(text)) if isinstance(r.get("date"), str)]
 
 
-def run(out_dir: Path, month: str, today: date, summary_path: Path, search_path: Path | None = None) -> str:
+def _read_worker(path: Path | None) -> list[dict[str, str]]:
+    """metrics/worker_cpu.csv's rows; none when it is absent or cannot be read
+    (the CPU table then reads n/a, and the audience report is still written)."""
+    if path is None:
+        return []
+    try:
+        return read_worker_file(path)
+    except MetricsFileError as exc:
+        log.warning("views report: %s; the Worker CPU table reads n/a", exc)
+        return []
+
+
+def run(out_dir: Path, month: str, today: date, summary_path: Path, search_path: Path | None = None,
+        worker_path: Path | None = None) -> str:
     """Write report-<month>.md and summary_line.txt in out_dir. Returns "written",
     "waiting" (the month's last day is not rolled up yet), "no data" or "failed"; never raises."""
     try:
@@ -275,7 +360,8 @@ def run(out_dir: Path, month: str, today: date, summary_path: Path, search_path:
             log.info("views report: %s is not rolled up yet; the report waits", last)
             return "waiting"
         search = _read_search(search_path)
-        months = [gather(m, summary, search) for m in previous_months(month)]
+        worker = _read_worker(worker_path)
+        months = [gather(m, summary, search, worker) for m in previous_months(month)]
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / f"report-{month}.md").write_text(render(month, months, today), encoding="utf-8", newline="\n")
         (out_dir / "summary_line.txt").write_text(summary_line(month, months[-1]) + "\n", encoding="utf-8")

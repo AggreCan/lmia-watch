@@ -27,7 +27,8 @@
 # post the daily digest to X and to Bluesky when their secrets exist, deposit
 # a new ESDC quarter on Zenodo when its token exists, save the database and the public files back to R2, keep
 # the audience counts of the finished days in R2 when the analytics token
-# exists, append Search Console's daily figures when its key exists, write
+# exists, and with the same token the Worker's CPU time per finished day,
+# append Search Console's daily figures when its key exists, write
 # the monthly audience report on the first run of a month, run the monthly
 # expiry checks on the first of a month, write the run status, and report the
 # items needing attention (failed run, one GitHub issue).
@@ -56,9 +57,11 @@
 #   sent again the next night; it never stops the run.
 # - An audience roll-up that fails is reported (views_rollup: failed) and
 #   caught up the next night; it never stops the run, and a summary that
-#   could not be downloaded is never replaced. The same holds for the Search
-#   Console import (search_console: failed) and its file, and for the monthly
-#   report (views_report: failed), which the next run writes instead.
+#   could not be downloaded is never replaced. The same holds for the Worker
+#   CPU record (worker_metrics state failed) and metrics/worker_cpu.csv, for
+#   the Search Console import (search_console: failed) and its file, and for
+#   the monthly report (views_report: failed), which the next run writes
+#   instead.
 # - An IndexNow submission that fails is reported (indexnow in the run status)
 #   and never stops the run; only a rejection (the key file or the payload is
 #   wrong) is an item needing attention.
@@ -87,7 +90,8 @@
 # BSKY_HANDLE, BSKY_APP_PASSWORD (the Bluesky post, docs/bluesky-account.md);
 # ZENODO_TOKEN (the Zenodo deposit, docs/zenodo.md);
 # CLOUDFLARE_ANALYTICS_TOKEN (Account Analytics Read only, the audience
-# roll-up, docs/search-engines.md section 6; without it the step does nothing);
+# roll-up and the Worker CPU record, docs/search-engines.md section 6; without
+# it the roll-up does nothing and the CPU record reports "no credentials");
 # GSC_SERVICE_ACCOUNT_JSON (a Google service account's JSON key, added as a
 # user of the Search Console property; without it the import reports "no
 # credentials"). The Worker secret VIEWS_SALT_KEY (the daily visitor code) is
@@ -699,6 +703,84 @@ jobs:
             echo "no data" > "$out/last_outcome.txt"
           fi
 
+      # The Worker's CPU time (docs/search-engines.md, section 6, "Worker CPU
+      # metrics"): one row per finished UTC day in metrics/worker_cpu.csv in
+      # R2, from the GraphQL Analytics API's workersInvocationsAdaptive
+      # dataset for the Worker lmia-watch (requests, CPU time and its
+      # percentiles, start-up CPU, memory, and the month to date against the
+      # plan's included CPU time with a projection to the month's end).
+      # worker-metrics asks for every day after the newest row (from
+      # 2026-11-01 on the first night, never further back than the 90 days
+      # Cloudflare keeps), a week per query, so a night that failed is caught
+      # up by the next. It reads with the roll-up's CLOUDFLARE_ANALYTICS_TOKEN;
+      # without it, or without the account id, the outcome is "no
+      # credentials" and nothing is asked. The file is downloaded first, and a
+      # download that fails for any reason but "does not exist" stops the
+      # step, so a shorter file never replaces it. summary.json reads failed
+      # until the file is in R2 (the run status's worker_metrics). It never
+      # stops the run.
+      - name: Record the Worker's CPU time (only when CLOUDFLARE_ANALYTICS_TOKEN is set)
+        id: worker_metrics
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          CLOUDFLARE_ANALYTICS_TOKEN: ${{ secrets.CLOUDFLARE_ANALYTICS_TOKEN }}
+        run: |
+          out=data/out/worker_metrics
+          mkdir -p "$out"
+          failed() {
+            printf '{"state": "failed", "detail": "%s"}\n' "$1" > "$out/summary.json"
+          }
+          failed "the step stopped before it finished"
+          # The same retrying upload as "Save the public files to R2".
+          put() {
+            local attempt
+            for attempt in 1 2 3; do
+              if "$WRANGLER" r2 object put --remote "$1" --file "$2"; then return 0; fi
+              echo "::warning::upload of $1 failed (attempt $attempt of 3)"
+              sleep $((20 * attempt))
+            done
+            return 1
+          }
+          rm -f "$out/worker_cpu.csv" "$out/result.json"
+          if [ -n "$CLOUDFLARE_ANALYTICS_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            got=""
+            for attempt in 1 2 3; do
+              if "$WRANGLER" r2 object get --remote "$BUCKET/metrics/worker_cpu.csv" --file "$out/worker_cpu.csv" > "$out/get.log" 2>&1; then
+                got=yes
+                break
+              fi
+              if grep -qi "specified key does not exist" "$out/get.log"; then
+                got=missing
+                rm -f "$out/worker_cpu.csv"
+                break
+              fi
+              sleep 20
+            done
+            if [ -z "$got" ]; then
+              echo "metrics/worker_cpu.csv could not be downloaded; nothing fetched"
+              cat "$out/get.log"
+              failed "metrics/worker_cpu.csv could not be downloaded"
+              exit 1
+            fi
+          fi
+          code=0
+          python -m lmia_pipeline.nightly worker-metrics --account "$CLOUDFLARE_ACCOUNT_ID" --script lmia-watch \
+            --csv "$out/worker_cpu.csv" --out "$out/result.json" || code=$?
+          if [ "$code" != "0" ]; then
+            if [ -s "$out/result.json" ]; then mv "$out/result.json" "$out/summary.json"; fi
+            exit 1
+          fi
+          fetched=$(python -c 'import json, sys; print(len(json.load(open(sys.argv[1])).get("days_fetched") or []))' "$out/result.json")
+          if [ "$fetched" != "0" ]; then
+            if ! put "$BUCKET/metrics/worker_cpu.csv" "$out/worker_cpu.csv"; then
+              failed "metrics/worker_cpu.csv was not saved to R2"
+              exit 1
+            fi
+          fi
+          mv "$out/result.json" "$out/summary.json"
+
       # Search Console's figures (docs/search-engines.md, section 6): clicks,
       # impressions, position and the top 50 queries of every final day after
       # the newest in views/search_console.csv, appended to it. Google keeps
@@ -756,9 +838,9 @@ jobs:
 
       # The monthly audience report (docs/search-engines.md, section 6): on
       # the first run of a UTC month, views/report-<YYYY-MM>.md for the month
-      # just ended, from the summary and the Search Console file as R2 holds
-      # them after the two steps above, with the three months before it
-      # beside it. Every night this asks R2 whether last month's report
+      # just ended, from the summary, the Worker CPU file and the Search
+      # Console file as R2 holds them after the steps above, with the three
+      # months before it beside it. Every night this asks R2 whether last month's report
       # exists ("not due" when it does), so a night that fails is made up by
       # the next. The report waits up to a week for the month's last day to
       # be rolled up ("waiting"). Its one-line summary goes to LAST_RUN.md.
@@ -791,8 +873,10 @@ jobs:
           if [ "$code" = "1" ]; then exit 1; fi
           code=0; fetch views/search_console.csv "$out/search_console.csv" || code=$?
           if [ "$code" = "1" ]; then exit 1; fi
+          code=0; fetch metrics/worker_cpu.csv "$out/worker_cpu.csv" || code=$?
+          if [ "$code" = "1" ]; then exit 1; fi
           python -m lmia_pipeline views-report --month "$month" --summary "$out/summary.csv" \
-            --search "$out/search_console.csv" --out "$out"
+            --search "$out/search_console.csv" --worker-cpu "$out/worker_cpu.csv" --out "$out"
           outcome=$(cat "$out/outcome.txt")
           if [ "$outcome" = "written" ]; then
             "$WRANGLER" r2 object put --remote "$BUCKET/views/report-$month.md" --file "$out/report-$month.md"
@@ -839,13 +923,13 @@ jobs:
       # notice first listed tonight is one of the notices), what the checks
       # found, the outcomes of the X
       # post, the Bluesky post, the Zenodo deposit, the search database sync,
-      # the audience roll-up, the Search Console import, the monthly report
-      # and the IndexNow submission, where the database
+      # the audience roll-up, the Worker CPU record, the Search Console
+      # import, the monthly report and the IndexNow submission, where the database
       # came from (restore), the smoke test and any rollback, and the HTML
       # and expiry checks. Written whatever happened above. The Bluesky, Zenodo,
-      # search-sync, roll-up, Search Console, report, IndexNow and rollback
-      # steps write "failed" before they start, so a step stopped by its time
-      # limit still reads as failed.
+      # search-sync, roll-up, Worker CPU, Search Console, report, IndexNow and
+      # rollback steps write "failed" before they start, so a step stopped by
+      # its time limit still reads as failed.
       - name: Write the run status
         if: ${{ always() }}
         run: |
@@ -859,6 +943,7 @@ jobs:
             --indexnow-outcome data/out/indexnow/last_outcome.txt \
             --search-console-outcome data/out/search_console/last_outcome.txt \
             --views-report-outcome data/out/report/last_outcome.txt \
+            --worker-metrics data/out/worker_metrics/summary.json \
             --restore data/out/restore.json --smoke data/out/deploy/smoke.json \
             --rollback-outcome data/out/deploy/rollback.txt --version-before data/out/deploy/version_before.txt \
             --checks data/out/checks.json \
@@ -902,6 +987,12 @@ jobs:
           if [ -f data/out/views/last_outcome.txt ]; then
             echo "" >> LAST_RUN.md
             echo "Audience roll-up: $(cat data/out/views/last_outcome.txt)" >> LAST_RUN.md
+          fi
+          # The Worker CPU line, from the run status (nothing when the step did not run).
+          python -m lmia_pipeline.nightly worker-cpu-line --status data/out/status.json > data/out/worker_cpu_line.txt 2>/dev/null || true
+          if [ -s data/out/worker_cpu_line.txt ]; then
+            echo "" >> LAST_RUN.md
+            cat data/out/worker_cpu_line.txt >> LAST_RUN.md
           fi
           if [ -f data/out/search_console/last_outcome.txt ]; then
             echo "" >> LAST_RUN.md

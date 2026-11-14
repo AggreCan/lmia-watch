@@ -33,6 +33,14 @@ one, and always leaves a status file the site's daily check can read.
   indexnow  after a deploy that worked: send the pages changed since the
             run's start to IndexNow (indexnow.py) and write the outcome.
             Exits 1 only when the key or the payload was rejected.
+  worker-metrics
+            the Worker's CPU time for every finished UTC day the CSV lacks,
+            merged into it (worker_metrics.py), with the outcome summary
+            written as JSON. Reads CLOUDFLARE_ANALYTICS_TOKEN; exits 1 only
+            when the state is failed.
+  worker-cpu-line
+            print the Worker CPU line for LAST_RUN.md from the run status
+            (nothing when the step did not run); always exits 0.
   site-bundle-check
             for the site-only deploy (deploy-site.yml): compare the data
             files of an unpacked static.tar.gz with the ones the live site
@@ -62,6 +70,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config, indexnow, resilience
+from . import worker_metrics as worker_cpu
 from .sources import notices as gov_notices
 from .sources import registers as designated
 
@@ -357,6 +366,7 @@ def run_status(
     restore_info: dict[str, Any] | None = None, smoke: dict[str, Any] | None = None,
     rollback: str | None = None, version_before: str | None = None, checks: dict[str, Any] | None = None,
     indexnow_outcome: str | None = None, search_console: str | None = None, views_report: str | None = None,
+    worker_metrics: Any = None,
 ) -> dict[str, Any]:
     """status.json for the site's daily check. Every input may be missing: the
     status then says what is missing rather than failing to be written.
@@ -372,7 +382,10 @@ def run_status(
     audience report: "written", "not due", "waiting", "no data" or
     "failed"). They are reported beside the stages, not as stages, so a
     refused post, a failed deposit, sync, roll-up, import, report or
-    submission alerts without marking the data refresh failed.
+    submission alerts without marking the data refresh failed. The same
+    holds for worker_metrics, the summary the Worker CPU step wrote (state
+    "ok", "failed" or "no credentials", and the figures), kept as the
+    worker_metrics field; {"state": "not run"} when the step left none.
 
     The resilience fields: steps (every workflow step's outcome, which the
     retry gate reads), restore (where the database came from), smoke (the
@@ -436,6 +449,7 @@ def run_status(
         "views_rollup": views or "not run",
         "search_console": search_console or "not run",
         "views_report": views_report or "not run",
+        "worker_metrics": worker_cpu.status_field(worker_metrics),
         "indexnow": indexnow_outcome or "not run",
         "restore": restored,
         "smoke": verdict,
@@ -678,6 +692,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--indexnow-outcome", default=None, help="the IndexNow submission's outcome file")
     s.add_argument("--search-console-outcome", default=None, help="the Search Console import's outcome file")
     s.add_argument("--views-report-outcome", default=None, help="the monthly audience report's outcome file")
+    s.add_argument("--worker-metrics", default=None, help="the Worker CPU step's summary (JSON)")
     s.add_argument("--restore", default=None, help="the restore record")
     s.add_argument("--smoke", default=None, help="the smoke test's result file")
     s.add_argument("--rollback-outcome", default=None, help="the rollback step's outcome file")
@@ -734,6 +749,15 @@ def main(argv: list[str] | None = None) -> int:
     ix.add_argument("--out-dir", default=None,
                     help="where last_outcome.txt and urls.txt are written (default data/out/indexnow)")
     ix.add_argument("--dry-run", action="store_true", help="select and list the URLs, send nothing")
+    wm = sub.add_parser("worker-metrics", help="record the Worker's CPU time for the finished UTC days the CSV lacks")
+    wm.add_argument("--account", default=os.environ.get("CLOUDFLARE_ACCOUNT_ID") or "",
+                    help="the Cloudflare account id (default $CLOUDFLARE_ACCOUNT_ID)")
+    wm.add_argument("--script", default=worker_cpu.SCRIPT, help=f"the Worker's name (default {worker_cpu.SCRIPT})")
+    wm.add_argument("--csv", required=True,
+                    help="metrics/worker_cpu.csv as downloaded from R2 (may be missing); rewritten in place")
+    wm.add_argument("--out", required=True, help="where to write the outcome summary (JSON)")
+    wl = sub.add_parser("worker-cpu-line", help="print the Worker CPU line for LAST_RUN.md")
+    wl.add_argument("--status", required=True)
     args = parser.parse_args(argv)
 
     if args.command == "pack":
@@ -781,6 +805,10 @@ def main(argv: list[str] | None = None) -> int:
         return _site_bundle_check(args)
     if args.command == "indexnow":
         return _indexnow(args)
+    if args.command == "worker-metrics":
+        return _worker_metrics(args)
+    if args.command == "worker-cpu-line":
+        return _worker_cpu_line(args)
 
     verify_result = None
     try:
@@ -795,7 +823,8 @@ def main(argv: list[str] | None = None) -> int:
                         rollback=_read(args.rollback_outcome), version_before=_read(args.version_before),
                         checks=_read_json(args.checks), indexnow_outcome=_read(args.indexnow_outcome),
                         search_console=_read(args.search_console_outcome),
-                        views_report=_read(args.views_report_outcome))
+                        views_report=_read(args.views_report_outcome),
+                        worker_metrics=_read_json(args.worker_metrics))
     _write_json(Path(args.out), status)
     print(json.dumps(status, indent=1))
     return 0
@@ -905,6 +934,25 @@ def _indexnow(args: argparse.Namespace) -> int:
     log.info("indexnow: %d URLs selected, %d accepted, %d of %d batches sent; the list is in %s",
              record["urls"], record["accepted"], record["sent"], record["batches"], out / indexnow.URLS_FILE)
     return 1 if rejected else 0
+
+
+def _worker_metrics(args: argparse.Namespace) -> int:
+    # The token comes from the environment only and is never printed; the
+    # summary written and the line printed hold the state and figures alone.
+    summary = worker_cpu.run(Path(args.csv), account=args.account, script=args.script)
+    _write_json(Path(args.out), summary)
+    detail = f" ({summary['detail']})" if summary.get("detail") else ""
+    (log.error if summary["state"] == "failed" else log.info)("worker-metrics: %s%s", summary["state"], detail)
+    print(f"worker-metrics: {summary['state']}{detail}")
+    return 1 if summary["state"] == "failed" else 0
+
+
+def _worker_cpu_line(args: argparse.Namespace) -> int:
+    status = _read_json(args.status)
+    line = worker_cpu.last_run_line(status.get("worker_metrics") if isinstance(status, dict) else None)
+    if line:
+        print(line)
+    return 0
 
 
 def _summary(lines: list[str]) -> None:

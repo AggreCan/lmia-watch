@@ -759,6 +759,16 @@ def test_attention_items_keep_the_existing_wording():
     assert resilience.attention_items({"stages": [], "x_post": "posted", "smoke": "unverifiable"}) == []
 
 
+def test_only_failed_worker_metrics_is_an_item():
+    failed = {"stages": [], "worker_metrics": {"state": "failed", "detail": "2026-11-13 to 2026-11-13: HTTP 500"}}
+    assert resilience.attention_items(failed) == ["Worker metrics: failed (caught up next run)"]
+    for field in ({"state": "ok"}, {"state": "no credentials", "detail": "no account id"}, {"state": "not run"},
+                  None, "failed", {}):
+        assert resilience.attention_items({"stages": [], "worker_metrics": field}) == [], field
+    # A status from before the field existed.
+    assert resilience.attention_items({"stages": []}) == []
+
+
 def test_only_an_indexnow_rejection_is_an_item():
     rejected = {"stages": [], "indexnow": "rejected (403)"}
     assert resilience.attention_items(rejected) == ["IndexNow: rejected; check the key file"]

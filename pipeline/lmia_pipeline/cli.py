@@ -132,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     vp.add_argument("--month", default=None, help="YYYY-MM (default: the month before today, UTC)")
     vp.add_argument("--summary", required=True, help="views/summary.csv as downloaded from R2")
     vp.add_argument("--search", default=None, help="views/search_console.csv as downloaded from R2, when it exists")
+    vp.add_argument("--worker-cpu", default=None, help="metrics/worker_cpu.csv as downloaded from R2, when it exists")
     vp.add_argument("--out", required=True, help="folder for report-<month>.md, summary_line.txt and outcome.txt")
     vp.add_argument("--today", default=None, help="YYYY-MM-DD (default: today, UTC)")
     return parser
@@ -393,7 +394,8 @@ def _views_report(args: argparse.Namespace) -> int:
     today = date.fromisoformat(args.today) if args.today else datetime.now(timezone.utc).date()
     month = args.month or views_report.report_month(today)
     out = Path(args.out)
-    outcome = views_report.run(out, month, today, Path(args.summary), Path(args.search) if args.search else None)
+    outcome = views_report.run(out, month, today, Path(args.summary), Path(args.search) if args.search else None,
+                               Path(args.worker_cpu) if args.worker_cpu else None)
     out.mkdir(parents=True, exist_ok=True)
     (out / "outcome.txt").write_text(outcome + "\n", encoding="utf-8")
     log.info("views-report %s: %s", month, outcome)

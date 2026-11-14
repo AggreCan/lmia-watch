@@ -78,7 +78,8 @@ class FakeHttp:
     """Stands in for requests.Session. Answers the SQL API per day from `days`
     (day -> (kinds, counts, feeds) or (kinds, counts, feeds, audience answers);
     a day not listed has no data points; three answers stand for a day before
-    the bot flag), the Bluesky profile from `profile` and the X profile from
+    the bot flag; an audience dict without "cache" stands for a day before the
+    page cache), the Bluesky profile from `profile` and the X profile from
     `x_profile`. `fail` replaces every SQL answer."""
 
     def __init__(self, days: dict | None = None, *, fail: FakeResponse | Exception | None = None,
@@ -116,6 +117,8 @@ class FakeHttp:
             return answer(kinds)
         if "blob8 AS agent" in sql:
             return answer(extra["audience"])
+        if "blob11 AS cache" in sql:
+            return answer(extra.get("cache", []))
         if "SUM(_sample_interval) AS pages" in sql:
             return answer(extra["routes"])
         if "AS uncoded" in sql:
@@ -179,7 +182,8 @@ def test_each_query_is_a_post_with_the_sql_as_body_and_the_token_only_in_the_hea
     assert roll(tmp_path, http, day=YESTERDAY) == "rolled up"
     assert [p["sql"] for p in http.posts] == [
         vr.kinds_sql(YESTERDAY), vr.counts_sql(YESTERDAY), vr.feeds_sql(YESTERDAY), vr.audience_sql(YESTERDAY),
-        vr.human_routes_sql(YESTERDAY), vr.visitors_sql(YESTERDAY), vr.visits_sql(YESTERDAY)]
+        vr.human_routes_sql(YESTERDAY), vr.visitors_sql(YESTERDAY), vr.visits_sql(YESTERDAY),
+        vr.page_cache_sql(YESTERDAY)]
     for p in http.posts:
         assert p["url"] == f"https://api.cloudflare.com/client/v4/accounts/{ACCOUNT}/analytics_engine/sql"
         assert p["headers"]["Authorization"] == f"Bearer {TOKEN}"
@@ -195,7 +199,7 @@ def test_the_day_file_holds_the_total_the_kinds_every_count_and_every_feed(tmp_p
     assert roll(tmp_path) == "rolled up"
     header, rows = read_csv(tmp_path / "2026-10-21.csv")
     assert header == vr.DAY_HEADER == ["date", "section", "route", "kind", "lang", "country", "referrer", "status",
-                                       "feed", "responses", "subscribers", "agent", "device"]
+                                       "feed", "responses", "subscribers", "agent", "device", "cache"]
     assert {r["date"] for r in rows} == {"2026-10-21"}
     sections = [r["section"] for r in rows]
     assert sections == ["total"] + ["kind"] * 7 + ["count"] * 9 + ["feed"] * 3 + ["audience"]
@@ -252,7 +256,8 @@ def test_the_summary_gets_one_row_per_day_and_a_re_run_replaces_it_in_place(tmp_
                                            "feed_subscribers", "bluesky_followers", "top_routes",
                                            "human_pages", "bot_pages", "unique_visitors", "human_visits",
                                            "human_by_country", "human_by_device", "human_by_lang", "human_by_route",
-                                           "x_followers", "employers", "records"]
+                                           "x_followers", "employers", "records",
+                                           "page_cache_hits", "page_cache_misses"]
     assert [r["date"] for r in rows] == ["2026-10-19", "2026-10-20", "2026-10-21"]
     assert rows[0]["top_routes"] == "/ 60"  # earlier rows are kept as they were
     new = rows[-1]
@@ -264,6 +269,8 @@ def test_the_summary_gets_one_row_per_day_and_a_re_run_replaces_it_in_place(tmp_
         **dict.fromkeys(vr.AUDIENCE_COLUMNS, ""),
         # Not the last day of a month (no X reading), and no stats.json in this test.
         "x_followers": "", "employers": "", "records": "",
+        # A day before the page cache: blank, never 0.
+        "page_cache_hits": "", "page_cache_misses": "",
     }
     assert rows[0]["human_pages"] == "" and rows[0]["unique_visitors"] == ""  # older rows read with blanks
 
@@ -354,8 +361,8 @@ def test_missing_days_are_caught_up_and_empty_days_are_not_written(tmp_path):
     assert roll(tmp_path, http) == "rolled up"
     asked = [p["sql"] for p in http.posts if "GROUP BY kind " in p["sql"]]
     assert asked == [vr.kinds_sql(date(2026, 10, d)) for d in (18, 19, 20, 21)]
-    # An empty day costs one question, not seven.
-    assert len(http.posts) == 4 + 2 * 6
+    # An empty day costs one question, not eight.
+    assert len(http.posts) == 4 + 2 * 7
     assert sorted(p.name for p in tmp_path.glob("2026-*.csv")) == ["2026-10-18.csv", "2026-10-21.csv"]
     assert (tmp_path / vr.ROLLED_UP).read_text(encoding="utf-8") == "2026-10-18\n2026-10-21\n"
     _, rows = read_csv(summary)
@@ -524,7 +531,8 @@ def test_the_people_and_bot_queries_read_page_views_below_400_and_only_count_cod
     # No query ever reads a visitor code back: blob10 appears only inside a
     # distinct count or a comparison with the empty string.
     for sql in (vr.kinds_sql(YESTERDAY), vr.counts_sql(YESTERDAY), vr.feeds_sql(YESTERDAY), vr.audience_sql(YESTERDAY),
-                vr.human_routes_sql(YESTERDAY), vr.visitors_sql(YESTERDAY), vr.visits_sql(YESTERDAY)):
+                vr.human_routes_sql(YESTERDAY), vr.visitors_sql(YESTERDAY), vr.visits_sql(YESTERDAY),
+                vr.page_cache_sql(YESTERDAY)):
         rest = sql.replace("count(DISTINCT blob10)", "").replace("blob10 = ''", "").replace("blob10 != ''", "")
         assert "blob10" not in rest, sql
 
@@ -659,3 +667,63 @@ def test_the_site_counts_come_from_tonights_stats_and_go_on_yesterdays_row_only(
                 '{"counts": {"employers": 1}}'):
         stats.write_text(bad, encoding="utf-8")
         assert vr.site_counts(stats) == {}, bad
+
+
+# -- the page cache (blob11) ----------------------------------------------------
+
+CACHE = [{"cache": "", "pages": "40"}, {"cache": "hit", "pages": "55"}, {"cache": "miss", "pages": "25"}]
+
+
+def test_the_page_cache_query_reads_page_views_below_400_by_cache_state():
+    where = f"timestamp >= toDateTime({START}) AND timestamp < toDateTime({START + 86_400})"
+    assert vr.page_cache_sql(YESTERDAY) == (
+        "SELECT blob11 AS cache, SUM(_sample_interval) AS pages FROM lmia_watch_views "
+        f"WHERE blob2 = 'page' AND double1 < 400 AND {where} GROUP BY cache ORDER BY cache FORMAT JSON")
+
+
+def test_a_day_with_hits_and_misses_fills_both_columns_and_the_day_file(tmp_path):
+    assert roll(tmp_path, FakeHttp(flagged_day(cache=CACHE))) == "rolled up"
+    row = summary_last(tmp_path)
+    assert (row["page_cache_hits"], row["page_cache_misses"]) == ("55", "25")
+    # The other columns are unchanged by the cache.
+    assert (row["pages"], row["human_pages"]) == ("120", "92")
+    _, rows = read_csv(tmp_path / "2026-10-21.csv")
+    cache = [(r["kind"], r["cache"], r["responses"]) for r in rows if r["section"] == "page_cache"]
+    assert cache == [("page", "", "40"), ("page", "hit", "55"), ("page", "miss", "25")]
+    assert rows[-1]["section"] == "page_cache"
+
+
+def test_hits_without_misses_read_zero_misses(tmp_path):
+    assert roll(tmp_path, FakeHttp(flagged_day(cache=[{"cache": "hit", "pages": "7"}]))) == "rolled up"
+    row = summary_last(tmp_path)
+    assert (row["page_cache_hits"], row["page_cache_misses"]) == ("7", "0")
+
+
+def test_a_day_the_cache_considered_nothing_is_blank_never_zero(tmp_path):
+    # Points written before the Worker wrote blob11 read back with an empty state.
+    for cache in ([{"cache": "", "pages": "120"}], []):
+        assert roll(tmp_path, FakeHttp(flagged_day(cache=cache))) == "rolled up", cache
+        row = summary_last(tmp_path)
+        assert (row["page_cache_hits"], row["page_cache_misses"]) == ("", ""), cache
+
+
+def test_a_cache_state_the_worker_would_never_write_counts_as_not_considered(tmp_path):
+    odd = [{"cache": "HIT", "pages": "5"}, {"cache": "Mozilla/5.0", "pages": "3"}, {"cache": None, "pages": "2"},
+           {"cache": "miss", "pages": "4"}]
+    assert roll(tmp_path, FakeHttp(flagged_day(cache=odd))) == "rolled up"
+    row = summary_last(tmp_path)
+    assert (row["page_cache_hits"], row["page_cache_misses"]) == ("0", "4")
+    _, rows = read_csv(tmp_path / "2026-10-21.csv")
+    assert [(r["cache"], r["responses"]) for r in rows if r["section"] == "page_cache"] == [("", "10"), ("miss", "4")]
+    text = (tmp_path / "2026-10-21.csv").read_text(encoding="utf-8")
+    assert "HIT" not in text and "Mozilla" not in text
+
+
+def test_a_summary_written_before_the_cache_columns_reads_and_keeps_its_rows(tmp_path):
+    summary = tmp_path / vr.SUMMARY
+    summary.write_text(",".join(vr.SUMMARY_HEADER[:-2]) + "\n2026-10-20,1,1,0,0,0,0,0,0,,/ 1\n", encoding="utf-8")
+    assert roll(tmp_path, FakeHttp(flagged_day(cache=CACHE))) == "rolled up"
+    header, rows = read_csv(summary)
+    assert header == vr.SUMMARY_HEADER
+    assert [(r["date"], r["page_cache_hits"], r["page_cache_misses"]) for r in rows] == [
+        ("2026-10-20", "", ""), ("2026-10-21", "55", "25")]
