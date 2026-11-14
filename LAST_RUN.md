@@ -1,4 +1,4 @@
-Last successful refresh: 2026-11-13 02:28 UTC
+Last successful refresh: 2026-11-14 02:15 UTC
 
 X post: posted
 
@@ -10,16 +10,16 @@ Search database sync: synced
 
 Audience roll-up: rolled up
 
-Search Console: imported 1 day
+Search Console: up to date
 
-IndexNow: submitted 956 URLs
+IndexNow: submitted 893 URLs
 
-Open to international candidates: facet 8174 live, feed 100, new 136, pages read 141, gone on fetch 20, sweep not due, grades A 1022 B 3911 C 1214
+Open to international candidates: facet 8204 live, feed 100, new 125, pages read 125, gone on fetch 0, sweep not due, grades A 1030 B 3976 C 1245
 
-Designated-employer lists: 24 lists (1 blocked, 2 failing, 21 ok), 5733 current rows, 1185 employer matches; blocked: aip_pe; failing: rcip_brandon, rcip_steinbach; aip_ns: read live, the copy loaded by hand not in use
+Designated-employer lists: 24 lists (1 blocked, 1 failing, 22 ok), 5734 current rows, 1185 employer matches; blocked: aip_pe; failing: rcip_steinbach; aip_ns: read live, the copy loaded by hand not in use
 
 Government notices: 11 listed, 0 new tonight
 
 Notices from this run (information; nothing failed):
 
-- registers: Designated-employer lists not read from tonight (their last good rows are kept): rcip_brandon (not fetched: https://economicdevelopmentbrandon.com/rcip/rcip-list-of-designated-employers)
+- registers: Designated-employer lists read again: rcip_brandon
