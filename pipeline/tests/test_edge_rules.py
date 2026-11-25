@@ -65,6 +65,20 @@ def test_four_rules_in_order_and_three_without_the_challenge():
     assert built[3]["expression"] == f'(http.host ne "{er.CACHE_HOST}")'
 
 
+def test_a_preview_name_opens_pages_only():
+    # The files under /data/ are served before the Worker runs, so its
+    # head-only answer never applies to them; a preview name that opened them
+    # would open the records (seen live on 2026-11-25, then closed).
+    welcome = {r["ref"]: r for r in rules()}["welcome"]["expression"]
+    start = welcome.index('http.request.method in {"GET" "HEAD"} and not cf.client.bot')
+    clause = welcome[start:]
+    for prefix in er.PREVIEW_CLOSED_PREFIXES:
+        assert f'not starts_with(http.request.uri.path, "{prefix}")' in clause
+    assert set(er.PREVIEW_CLOSED_PREFIXES) == {"/data/", "/api/"}
+    # The clause closes them before it names any fetcher.
+    assert clause.index('"/api/"') < clause.index('contains "')
+
+
 def test_the_key_is_in_the_first_rule_only():
     built = rules()
     assert built[0]["expression"] == f'(any(http.request.headers["{config.EDGE_CHECK_HEADER}"][*] eq "{KEY}"))'

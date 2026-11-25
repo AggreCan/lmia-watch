@@ -25,8 +25,9 @@ Who gets through, in rule order (the Free plan allows five custom rules):
    feeds, robots.txt, llms.txt, the sitemaps, the payment webhook, the
    stylesheet, scripts, fonts and images); and link-preview fetchers that run
    on a person's own device or server and so cannot be verified (WhatsApp,
-   iMessage, Mastodon and the like), which the Worker answers with the page's
-   head only (site/src/limits.ts), so the name is worth nothing to a scraper.
+   iMessage, Mastodon and the like), on pages only, which the Worker answers
+   with the page's head (site/src/limits.ts), so the name is worth nothing to
+   a scraper; the data files and the API stay behind the check for them.
 4. challenge (managed challenge). Everyone else: a browser passes Cloudflare's
    check, usually without a click, and keeps a clearance cookie; a script or
    a crawler nobody vouches for does not get the page.
@@ -81,6 +82,10 @@ UA = "lower(http.user_agent)"
 # file and the sitemaps. The records are in the pages, /data/*.json and /api/.
 OPEN_PREFIXES = ("/downloads/", "/data/feeds/", "/fonts/", "/hooks/", "/.well-known/", "/cdn-cgi/")
 OPEN_EXTENSIONS = ("txt", "xml", "css", "js", "png", "svg", "ico", "woff2", "webmanifest", "jpg", "jpeg", "webp", "gif")
+# What a link-preview name never opens (rule welcome): the data files and the
+# JSON API. The feeds under /data/feeds/ are open to any client through
+# OPEN_PREFIXES, whatever its name.
+PREVIEW_CLOSED_PREFIXES = ("/data/", "/api/")
 
 
 def load_agents(path: Path = AGENTS_FILE) -> dict[str, list[str]]:
@@ -124,7 +129,12 @@ def build_rules(agents: dict[str, list[str]], key: str, *, challenge: bool = Tru
     tools = (f'(not cf.client.bot and ({_any_agent(agents["tools"])} or http.user_agent eq "") '
              f"and not {open_paths()})")
     verified = f'(cf.client.bot and cf.verified_bot_category in {{{_quoted(agents["verified_categories"])}}})'
-    preview = (f'(http.request.method in {{"GET" "HEAD"}} and not cf.client.bot and {_any_agent(agents["preview"])})')
+    # Pages only: the Worker answers these names with a page's head, but the
+    # files under /data/ are served before the Worker runs and /api/ answers
+    # with data, so under either a preview name would be a way to the records.
+    closed = " and ".join(f'not starts_with({PATH}, "{p}")' for p in PREVIEW_CLOSED_PREFIXES)
+    preview = (f'(http.request.method in {{"GET" "HEAD"}} and not cf.client.bot and {closed} '
+               f'and {_any_agent(agents["preview"])})')
     skip = {"action": "skip", "action_parameters": {"ruleset": "current"}, "logging": {"enabled": True}}
     rules: list[dict[str, Any]] = [
         {"ref": "check_key", "description": "The project's own runs (check key)", **skip,

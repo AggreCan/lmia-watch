@@ -86,7 +86,9 @@ past the rules after it.
      `.webmanifest` or an image or font extension, which covers
      `robots.txt`, `llms.txt`, the IndexNow key file and the sitemaps;
    - link-preview fetchers Cloudflare has not verified, for `GET` and `HEAD`
-     only. A preview of a shared link is fetched from the sharer's own phone
+     on pages only, never under `/data/` or `/api/` (the files under
+     `/data/` are served before the Worker runs, so its head-only answer
+     would not apply to them). A preview of a shared link is fetched from the sharer's own phone
      or server (WhatsApp, iMessage, Mastodon), which Cloudflare cannot
      verify. The Worker answers these with the page's head only (title,
      description, card image), so the name is worth nothing to a scraper.
