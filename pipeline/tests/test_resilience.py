@@ -1,18 +1,18 @@
 """The resilience layer: the retry gate, the smoke test and rollback record,
-the weekly snapshot restore, the nightly HTML check and the monthly expiry
-checks, and the attention items and issue texts. Every network call goes to a
-fake session."""
+the weekly snapshot restore, the nightly HTML and edge checks and the monthly
+expiry checks, the edge check key, and the attention items and issue texts.
+Every network call goes to a fake session."""
 
 import gzip
 from pathlib import Path
 import json
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
-from lmia_pipeline import nightly, resilience
+from lmia_pipeline import config, nightly, resilience
 from lmia_pipeline.db import connect, log_run, upsert_employer
 
 TODAY = date(2026, 10, 22)
@@ -22,6 +22,11 @@ VERSION_B = "9f8e7d6c-aaaa-4bbb-8ccc-ddddeeeeffff"
 DEPLOY_TOKEN = "tok-deploy-secret-value"
 ANALYTICS_TOKEN = "tok-analytics-secret-value"
 ACCOUNT = "abc123abc123abc123abc123abc123ab"
+# A made-up check key of the right form (64 lower-case hex characters).
+KEY = "5ec2e7c0ffee" + "0123456789abcdef" * 3 + "d00d"
+# The first night the edge gate's "open" state is an item, and the night before.
+GATE_NIGHT = datetime.combine(resilience.EDGE_GATE_SINCE, time(0, 50), tzinfo=timezone.utc)
+NIGHT_BEFORE_GATE = GATE_NIGHT - timedelta(days=1)
 
 
 class Resp:
@@ -498,6 +503,17 @@ class TokenApi(FakeHttp):
         return answer
 
 
+class EdgeApi(TokenApi):
+    """TokenApi, with the home page answered as the edge answers it once the
+    challenge rule is on: a challenge without the check key, the page with it."""
+
+    def get(self, url, headers=None, timeout=None, stream=False, **kwargs):
+        if url != HOME:
+            return super().get(url, headers, timeout, stream, **kwargs)
+        self.calls.append((url, dict(headers or {})))
+        return home_page() if (headers or {}).get(config.EDGE_CHECK_HEADER) == KEY else challenge_page()
+
+
 def verified(status="active", expires=None):
     result = {"id": "t1", "status": status}
     if expires:
@@ -514,18 +530,21 @@ ENV = {"CLOUDFLARE_API_TOKEN": DEPLOY_TOKEN, "CLOUDFLARE_ANALYTICS_TOKEN": ANALY
 
 def test_checks_run_on_the_first_day_of_a_month_only():
     assert resilience.checks_due(FIRST) and not resilience.checks_due(TODAY)
-    # Another day: the HTML check alone, and no request to the API.
+    # Another day: the HTML and edge checks alone, and no request to the API.
     api = TokenApi({("", HOME): home_page()})
     result = resilience.run_checks(TODAY, ENV, api, domain="lmiawatch.ca", site_url=SITE, now=NOW)
     assert result["due"] is True and result["monthly"] is False and result["date"] == "2026-10-22"
     assert result["html_rewrite"]["state"] == "ok" and result["items"] == []
+    # NOW is before the challenge rule's date, so a page served without the key raises nothing.
+    assert result["edge_gate"]["state"] == "open"
     assert not {"deploy_token", "analytics_token", "domain"} & result.keys()
-    assert [url for url, _ in api.calls] == [HOME]
-    # The first of a month: the HTML check and the three expiry checks.
+    # The HTML check and the edge check's request without the key; ENV holds no key, so no third.
+    assert [url for url, _ in api.calls] == [HOME, HOME]
+    # The first of a month: the nightly checks and the three expiry checks.
     first = resilience.run_checks(FIRST, ENV, TokenApi({("", HOME): home_page()}), domain="lmiawatch.ca", site_url=SITE,
                                   now=FIRST_NOW)
     assert first["monthly"] is True
-    assert {"html_rewrite", "deploy_token", "analytics_token", "domain"} <= first.keys()
+    assert {"html_rewrite", "edge_gate", "deploy_token", "analytics_token", "domain"} <= first.keys()
 
 
 def test_tokens_and_domain_far_from_expiry_are_ok_and_a_missing_permission_is_unknown():
@@ -582,9 +601,11 @@ def test_checks_that_get_no_readable_answer_are_unknown_and_name_no_token():
 
 
 def test_checks_command_writes_its_file_and_logs_no_token(tmp_path, monkeypatch, caplog):
-    api = TokenApi({(DEPLOY_TOKEN, VERIFY_USER): verified(expires="2026-11-10T00:00:00Z"), ("", HOME): home_page()})
+    # The command reads the clock, so the edge answers as it does with the
+    # challenge rule on and the result does not depend on the date.
+    api = EdgeApi({(DEPLOY_TOKEN, VERIFY_USER): verified(expires="2026-11-10T00:00:00Z")})
     monkeypatch.setattr(nightly, "_session", lambda: api)
-    for name, value in ENV.items():
+    for name, value in {**ENV, "EDGE_CHECK_KEY": KEY}.items():
         monkeypatch.setenv(name, value)
     out = tmp_path / "checks.json"
     with caplog.at_level(logging.INFO):
@@ -593,14 +614,18 @@ def test_checks_command_writes_its_file_and_logs_no_token(tmp_path, monkeypatch,
     written = json.loads(out.read_text())
     assert written["due"] is True and written["monthly"] is True
     assert written["deploy_token"]["state"] == "expiring" and len(written["items"]) == 1
-    assert written["html_rewrite"]["state"] == "ok"
-    assert DEPLOY_TOKEN not in caplog.text and ANALYTICS_TOKEN not in caplog.text
-    # Another day: the HTML check runs, the expiry checks do not; the domain comes from --site-url.
+    assert written["html_rewrite"]["state"] == "ok" and written["edge_gate"]["state"] == "ok"
+    assert "checks: edge_gate: ok" in caplog.text
+    for secret in (DEPLOY_TOKEN, ANALYTICS_TOKEN, KEY):
+        assert secret not in caplog.text and secret not in out.read_text()
+    # Another day: the nightly checks run, the expiry checks do not; the domain comes from --site-url.
     api.calls.clear()
     assert nightly.main(["checks", "--today", "2026-11-02", "--site-url", SITE, "--out", str(out)]) == 0
     written = json.loads(out.read_text())
     assert written["due"] is True and written["monthly"] is False and written["html_rewrite"]["state"] == "ok"
-    assert "deploy_token" not in written and [url for url, _ in api.calls] == [HOME]
+    # The HTML check (with the key), then the edge check without it and with it.
+    assert "deploy_token" not in written and [url for url, _ in api.calls] == [HOME, HOME, HOME]
+    assert [config.EDGE_CHECK_HEADER in h for _, h in api.calls] == [True, False, True]
 
 
 def test_the_domain_comes_from_the_site_address():
@@ -688,6 +713,252 @@ def test_the_html_item_reaches_the_run_status_without_the_expiry_label():
         result["items"][0],
         "Expiry check: The domain lmiawatch.ca expires 2026-11-25 (24 days); auto-renew is off",
     ]
+
+
+# -- the edge check key ---------------------------------------------------------
+
+CHECK = config.EDGE_CHECK_HEADER
+
+
+def challenge_page(status=403):
+    return Resp(status, "<!doctype html><html><head><title>Just a moment...</title></head></html>",
+                headers={"cf-mitigated": "challenge", "Content-Type": "text/html"})
+
+
+class GateHttp(FakeHttp):
+    """The edge in front of the site: one answer for a request carrying the
+    check key the rule names (KEY unless told otherwise), another for any
+    other request. Records every call."""
+
+    def __init__(self, keyless, keyed=None, rule_key=KEY):
+        super().__init__({})
+        self.keyless, self.keyed, self.rule_key = keyless, keyed, rule_key
+
+    def get(self, url, headers=None, timeout=None, stream=False, **kwargs):
+        self.calls.append((url, dict(headers or {})))
+        answer = self.keyed if (headers or {}).get(CHECK) == self.rule_key else self.keyless
+        if isinstance(answer, Exception):
+            raise answer
+        return answer if answer is not None else Resp(404)
+
+
+def test_the_check_key_goes_to_the_site_host_only(monkeypatch):
+    env = {"EDGE_CHECK_KEY": KEY}
+    for url in (HOME, SITE + "/data/stats.json", "https://www.lmiawatch.ca/search", "https://LMIAWatch.ca/data"):
+        assert config.edge_check_headers(url, SITE, env) == {"x-lmiawatch-check": KEY}, url
+    for url in ("http://lmiawatch.ca/", "https://api.cloudflare.com/client/v4/user/tokens/verify",
+                "https://www.jobbank.gc.ca/jobsearch", "https://api.indexnow.org/indexnow",
+                "https://lmiawatch.ca.example/", "https://pages.lmiawatch.ca/", "https://evil.example/?next=https://lmiawatch.ca/",
+                "https://lmiawatch.ca@evil.example/", "https://evil.example#@lmiawatch.ca", "lmiawatch.ca/", "", "https://[::1"):
+        assert config.edge_check_headers(url, SITE, env) == {}, url
+    # Without a site address the host is SITE_URL's.
+    monkeypatch.setattr(config, "SITE_URL", SITE)
+    assert config.edge_check_headers(HOME, env=env) == {CHECK: KEY}
+    monkeypatch.setattr(config, "SITE_URL", "https://lmiawatch.example")
+    assert config.edge_check_headers(HOME, env=env) == {}
+    # Without an env the key is read from the environment.
+    monkeypatch.setenv("EDGE_CHECK_KEY", KEY)
+    assert config.edge_check_headers(HOME, SITE) == {CHECK: KEY}
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", KEY.upper(), KEY[:-1], KEY + "a", "g" * 64, f'"{KEY}"',
+                                   KEY[:32] + " " + KEY[32:]])
+def test_an_absent_or_malformed_key_is_never_sent(value, monkeypatch):
+    env = {} if value is None else {"EDGE_CHECK_KEY": value}
+    assert config.edge_check_key(env) is None
+    assert config.edge_check_headers(HOME, SITE, env) == {}
+    http = site()
+    resilience.smoke(http, BASE, DATA_DATE, PATHS, sleep=lambda s: None, settle=0, env=env)
+    assert http.calls and all(CHECK not in h for _, h in http.calls)
+
+
+def test_a_key_pasted_with_a_line_break_is_read_without_it():
+    assert config.edge_check_key({"EDGE_CHECK_KEY": f" {KEY}\n"}) == KEY
+
+
+def test_the_smoke_test_sends_the_key_to_the_site_and_never_on_to_another_host():
+    http = site(**{"/search": Resp(302, headers={"Location": "/search?lang=en"}),
+                   "/data": Resp(301, headers={"location": "https://elsewhere.example/data"})})
+    http.routes[BASE + "/search?lang=en"] = [page()]
+    http.routes["https://elsewhere.example/data"] = [page()]
+    result = resilience.smoke(http, BASE, DATA_DATE, PATHS, sleep=lambda s: None, settle=0, env={"EDGE_CHECK_KEY": KEY})
+    assert result["verdict"] == "ok"
+    # The redirects are followed one hop at a time, so each hop decides for itself.
+    assert [(url, h.get(CHECK)) for url, h in http.calls] == [
+        (BASE + "/", KEY), (BASE + "/search", KEY), (BASE + "/search?lang=en", KEY),
+        (BASE + "/data", KEY), ("https://elsewhere.example/data", None), (BASE + "/employers/emp-a000000005", KEY)]
+    assert KEY not in json.dumps(result)
+
+
+def test_a_redirect_loop_ends_with_the_last_answer():
+    http = FakeHttp({HOME: Resp(301, headers={"Location": "/"})})
+    resp = resilience.site_get(http, HOME, {}, 5, site_url=SITE, env={"EDGE_CHECK_KEY": KEY})
+    assert resp.status_code == 301 and len(http.calls) == resilience.MAX_REDIRECTS + 1
+
+
+def test_the_html_check_carries_the_key_and_reads_the_page_behind_the_gate():
+    http = GateHttp(challenge_page(), home_page())
+    assert resilience.check_html_rewrite(http, SITE, NOW, {"EDGE_CHECK_KEY": KEY})["state"] == "ok"
+    assert http.calls[0][1][CHECK] == KEY
+    # Without the key the gate answers, which reads unknown and raises nothing, as before.
+    result = resilience.check_html_rewrite(http, SITE, NOW, {})
+    assert (result["state"], result["detail"]) == ("unknown", "HTTP 403") and "item" not in result
+    assert CHECK not in http.calls[1][1]
+
+
+# -- the nightly edge check ---------------------------------------------------
+
+EDGE_OPEN = ("The edge challenge is off: a browser-like request without the check key got the page, so scrapers are "
+             "being served. Apply the WAF rules again (python pipeline/scripts/edge_rules.py --apply, "
+             "docs/traffic-limits.md) and look at Security, WAF, Custom rules in the dashboard.")
+EDGE_KEY_REFUSED = ("The edge refused the run's check key: the secret EDGE_CHECK_KEY and the WAF rule differ, so the "
+                    "smoke test and the HTML check cannot read the site. Compare them with python "
+                    "pipeline/scripts/edge_rules.py --check and apply the rules with the key in the secret.")
+EDGE_NO_KEY = ("EDGE_CHECK_KEY is not set for the run, so its checks of the live site are challenged at the edge. "
+               "Set the repository secret to the key in the WAF rule (docs/traffic-limits.md).")
+WITH_KEY = {"EDGE_CHECK_KEY": KEY}
+
+
+def edge(http, env=WITH_KEY, now=GATE_NIGHT):
+    result = resilience.check_edge_gate(http, SITE, now, env)
+    assert KEY not in json.dumps(result)
+    return result
+
+
+def test_the_edge_items_read_as_written():
+    assert resilience.EDGE_ITEMS == {"open": EDGE_OPEN, "key refused": EDGE_KEY_REFUSED, "no key": EDGE_NO_KEY}
+    assert all(chr(0x2014) not in text for text in resilience.EDGE_ITEMS.values())
+
+
+@pytest.mark.parametrize("keyless", [
+    challenge_page(),
+    # A block by name, and Under Attack Mode's challenge.
+    Resp(403, "<title>Attention Required! | Cloudflare</title><h1>Sorry, you have been blocked</h1>"),
+    Resp(403, "error code: 1020"),
+    challenge_page(503),
+])
+def test_a_gate_that_turns_strangers_away_and_lets_the_key_through_is_ok(keyless):
+    http = GateHttp(keyless, home_page())
+    assert edge(http) == {"checked_at": GATE_NIGHT.isoformat(timespec="seconds"), "status": keyless.status_code,
+                          "challenged": True, "keyed_status": 200, "state": "ok"}
+    # Both ask for the home page as a browser would; only the second carries the key.
+    assert [url for url, _ in http.calls] == [HOME, HOME]
+    assert [h.get(CHECK) for _, h in http.calls] == [None, KEY]
+    assert all(h["User-Agent"] == resilience.HTML_CHECK_AGENT and h["Accept"] == resilience.HTML_CHECK_ACCEPT
+               for _, h in http.calls)
+
+
+def test_a_page_served_without_the_key_is_open_and_an_item_from_the_gate_date():
+    result = edge(GateHttp(home_page(), home_page()))
+    assert (result["state"], result["status"], result["challenged"], result["keyed_status"]) == ("open", 200, False, 200)
+    assert result["item"] == EDGE_OPEN
+    # With no key as well, open is the fault named: the missing key costs nothing while the gate is down.
+    assert edge(GateHttp(home_page()), env={})["item"] == EDGE_OPEN
+    # The night before, the same answer is recorded and raises nothing.
+    before = edge(GateHttp(home_page(), home_page()), now=NIGHT_BEFORE_GATE)
+    assert before["state"] == "open" and "item" not in before
+    assert before["detail"] == f"no item before {resilience.EDGE_GATE_SINCE}, when the challenge rule goes on"
+    # The date is the run's in UTC: 00:50 UTC on the gate date is still the evening before in Vancouver.
+    vancouver = GATE_NIGHT.astimezone(timezone(timedelta(hours=-7)))
+    assert vancouver.date() < resilience.EDGE_GATE_SINCE
+    assert edge(GateHttp(home_page(), home_page()), now=vancouver)["item"] == EDGE_OPEN
+
+
+@pytest.mark.parametrize("keyed", [challenge_page(), Resp(403, "forbidden"),
+                                   Resp(200, "<title>Just a moment...</title>", headers={"cf-mitigated": "challenge"})])
+def test_a_key_the_edge_refuses_is_an_item(keyed):
+    result = edge(GateHttp(challenge_page(), keyed))
+    assert (result["state"], result["challenged"], result["keyed_status"]) == ("key refused", True, keyed.status_code)
+    assert result["item"] == EDGE_KEY_REFUSED
+
+
+def test_a_secret_that_differs_from_the_rule_is_refused():
+    other = "a" * 64
+    http = GateHttp(challenge_page(), home_page(), rule_key=other)
+    result = edge(http)
+    assert result["state"] == "key refused" and result["item"] == EDGE_KEY_REFUSED
+    assert other not in json.dumps(http.calls[0]) and http.calls[1][1][CHECK] == KEY
+
+
+@pytest.mark.parametrize("env", [{}, {"EDGE_CHECK_KEY": ""}, {"EDGE_CHECK_KEY": KEY.upper()}])
+def test_no_well_formed_key_behind_a_standing_gate_is_an_item(env):
+    http = GateHttp(challenge_page(), home_page())
+    result = edge(http, env=env)
+    assert (result["state"], result["challenged"], result["keyed_status"]) == ("no key", True, None)
+    assert result["item"] == EDGE_NO_KEY
+    assert len(http.calls) == 1 and CHECK not in http.calls[0][1]
+
+
+@pytest.mark.parametrize("keyless, keyed, detail", [
+    (ConnectionError("reset"), home_page(), "without the key: request failed (ConnectionError)"),
+    (Resp(500, "oops"), home_page(), "without the key: HTTP 500"),
+    (Resp(429, "slow down"), home_page(), "without the key: HTTP 429"),
+    (challenge_page(), Resp(502, "bad gateway"), "with the key: HTTP 502"),
+    (challenge_page(), TimeoutError("slow"), "with the key: request failed (TimeoutError)"),
+])
+def test_no_answer_or_another_status_is_unknown_without_an_item(keyless, keyed, detail):
+    result = edge(GateHttp(keyless, keyed))
+    assert result["state"] == "unknown" and result["detail"] == detail and "item" not in result
+    assert result["challenged"] is (None if isinstance(keyless, Exception) else keyless.status_code == 403)
+
+
+def test_no_site_address_asks_nothing():
+    http = GateHttp(challenge_page(), home_page())
+    assert resilience.check_edge_gate(http, "https://lmiawatch.example", GATE_NIGHT, WITH_KEY) == {
+        "state": "unknown", "detail": "no site address configured"}
+    assert http.calls == []
+
+
+def test_the_edge_items_reach_the_run_status_without_the_expiry_label():
+    http = GateHttp(challenge_page(), challenge_page())
+    result = resilience.run_checks(TODAY, {**ENV, **WITH_KEY}, http, domain="lmiawatch.ca", site_url=SITE, now=GATE_NIGHT)
+    assert result["edge_gate"]["state"] == "key refused" and "item" not in result["edge_gate"]
+    # The HTML check read the challenge too, which is the edge check's to report.
+    assert result["html_rewrite"]["state"] == "unknown" and result["items"] == [EDGE_KEY_REFUSED]
+    expiry = "The domain lmiawatch.ca expires 2031-03-01 (20 days); auto-renew is off"
+    status = {"stages": [], "checks": {**result, "items": [EDGE_OPEN, EDGE_KEY_REFUSED, EDGE_NO_KEY, expiry]}}
+    assert resilience.attention_items(status) == [EDGE_OPEN, EDGE_KEY_REFUSED, EDGE_NO_KEY, f"Expiry check: {expiry}"]
+
+
+def test_a_check_that_raises_is_unknown(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("a fault in the check")
+    monkeypatch.setattr(resilience, "check_edge_gate", boom)
+    result = resilience.run_checks(TODAY, WITH_KEY, GateHttp(challenge_page(), home_page()), domain="lmiawatch.ca",
+                                   site_url=SITE, now=GATE_NIGHT)
+    assert result["edge_gate"] == {"state": "unknown", "detail": "the check failed (RuntimeError)"}
+    assert result["html_rewrite"]["state"] == "ok"
+
+
+def test_the_key_reaches_no_log_line_status_or_written_file(tmp_path, monkeypatch, caplog, capsys):
+    monkeypatch.setenv("EDGE_CHECK_KEY", KEY)
+    db = tmp_path / "lmia.sqlite"
+    make_db(db)
+    files = {name: tmp_path / name for name in ("checks.json", "smoke.json", "status.json", "run_started.txt")}
+    files["run_started.txt"].write_text("2000-01-01T00:00:00Z\n", encoding="utf-8")
+    with caplog.at_level(logging.DEBUG):
+        # A night the gate stands and takes the key: every check reads the site.
+        accepted = GateHttp(challenge_page(), home_page())
+        monkeypatch.setattr(nightly, "_session", lambda: accepted)
+        assert nightly.main(["smoke", "--base-url", SITE, "--data-date", "2026-10-21", "--out", str(files["smoke.json"]),
+                             "--settle", "0"]) == 0
+        assert nightly.main(["checks", "--today", "2001-02-03", "--site-url", SITE, "--out", str(files["checks.json"])]) == 0
+        assert json.loads(files["smoke.json"].read_text())["verdict"] == "ok"
+        assert json.loads(files["checks.json"].read_text())["edge_gate"]["state"] == "ok"
+        assert all(h.get(CHECK) == KEY for _, h in accepted.calls[:4])
+        # A night the rule holds another key: the item goes to the status and the issue.
+        monkeypatch.setattr(nightly, "_session", lambda: GateHttp(challenge_page(), home_page(), rule_key="b" * 64))
+        assert nightly.main(["checks", "--today", "2001-02-04", "--site-url", SITE, "--out", str(files["checks.json"])]) == 0
+        assert nightly.main(["status", "--db", str(db), "--started-file", str(files["run_started.txt"]),
+                             "--checks", str(files["checks.json"]), "--smoke", str(files["smoke.json"]),
+                             "--out", str(files["status.json"])]) == 0
+        assert nightly.main(["attention", "--status", str(files["status.json"]), "--run-url", "https://example.org/run/1",
+                             "--out-dir", str(tmp_path / "attention")]) == 1
+    assert (tmp_path / "attention" / "items.txt").read_text(encoding="utf-8") == EDGE_KEY_REFUSED + "\n"
+    written = [p.read_text(encoding="utf-8") for p in tmp_path.rglob("*") if p.suffix in (".json", ".txt", ".md")]
+    assert len(written) >= 8
+    for text in [caplog.text, capsys.readouterr().out, *written]:
+        assert KEY not in text
 
 
 # -- status, attention items and the issue ------------------------------------

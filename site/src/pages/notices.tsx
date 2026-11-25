@@ -152,7 +152,8 @@ function termList(d: NoticesFile, lang: Lang): string {
   return [...own, ...rest].join(", ");
 }
 
-function seo(lang: Lang): Seo {
+// Exported for the head a link preview gets (preview.ts).
+export function noticesSeo(lang: Lang): Seo {
   const title = t(lang, "notices.seo_title");
   return {
     path: "/notices",
@@ -183,7 +184,7 @@ export async function noticesPage(c: Context<AppEnv>): Promise<Response> {
     // Missing (no read yet) or unreadable: the page says so and guesses at nothing.
     return page(
       c,
-      <Layout lang={lang} title={t(lang, "notices.h1")} dataAsOf={stats.data_as_of} active="/notices" seo={seo(lang)}>
+      <Layout lang={lang} title={t(lang, "notices.h1")} dataAsOf={stats.data_as_of} active="/notices" seo={noticesSeo(lang)}>
         <Intro lang={lang} />
         <p>{t(lang, "notices.not_published")}</p>
       </Layout>,
@@ -193,7 +194,7 @@ export async function noticesPage(c: Context<AppEnv>): Promise<Response> {
   const failing = d.feeds.filter((f) => f.state !== "ok");
   return page(
     c,
-    <Layout lang={lang} title={t(lang, "notices.h1")} dataAsOf={stats.data_as_of} active="/notices" seo={seo(lang)}>
+    <Layout lang={lang} title={t(lang, "notices.h1")} dataAsOf={stats.data_as_of} active="/notices" seo={noticesSeo(lang)}>
       <Intro lang={lang} />
       <h2>
         {d.count && d.first && d.last

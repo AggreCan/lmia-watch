@@ -118,9 +118,11 @@ run rolls the Worker back to the recorded version (`wrangler rollback`),
 which puts the previous data back with it. The run status then reads
 `smoke: broken` and `deploy_rolled_back: true`, the posts and the public files
 are held back, the database is still saved, and the next retry deploys again.
-When the edge answers 403 or a challenge page (the dashboard's rules can
-refuse a cloud address), or the pages answer in some other unexpected way,
-the status reads `smoke: unverifiable` and nothing else happens.
+The smoke test sends the edge check key, which the WAF rules let through.
+When the edge answers 403 or a challenge page anyway (a key the rule does
+not name, which the edge check reports), or the pages answer in some other
+unexpected way, the status reads `smoke: unverifiable` and nothing else
+happens.
 
 **Restore from the weekly snapshot.** When both nightly backups are missing
 or damaged, the run lists `backups/weekly/` in R2 and starts from the newest
@@ -141,14 +143,33 @@ registrar permission, so the domain check reads `unknown` until that token is
 also given read access to the account's registrar domains.
 
 **HTML check.** Every night the same step fetches the home page as a browser
-would (an `Accept` header naming `text/html`, a browser's user agent) and
-expects a 200 with the page's ETag and exactly one Web Analytics beacon. A
-missing ETag or a second beacon means Cloudflare is rewriting the site's HTML
-again, which costs the 304s crawlers rely on (`docs/search-engines.md`,
-section 7), and is an attention item. Any other answer (another status, a
-challenge, no answer) reads `unknown` and raises nothing; the smoke test
-reports a site that does not answer. The result is under `checks.html_rewrite`
-in the run status, with `etag`, `beacons` and `content_encoding`.
+would (an `Accept` header naming `text/html`, a browser's user agent) with
+the edge check key, and expects a 200 with the page's ETag and exactly one
+Web Analytics beacon. A missing ETag or a second beacon means Cloudflare is
+rewriting the site's HTML again, which costs the 304s crawlers rely on
+(`docs/search-engines.md`, section 7), and is an attention item. Any other
+answer (another status, a challenge, no answer) reads `unknown` and raises
+nothing; the smoke test reports a site that does not answer, and the edge
+check a challenge. The result is under `checks.html_rewrite` in the run
+status, with `etag`, `beacons` and `content_encoding`.
+
+**Edge check.** The zone's WAF rules challenge every page request they
+cannot vouch for, and the run's own checks pass with the check key
+(`docs/traffic-limits.md`, section 1). Every night the same step asks for the
+home page twice as a browser: once without the key, which the edge must
+challenge or block, and once with it, which must get a 200. A page served
+without the key means the challenge is off (an item from 2026-11-26, the
+first night the challenge rule is meant to be on; before that it is recorded
+and raises nothing). A refusal of the key, or no key in the run with the
+gate standing, means the smoke test and the HTML check cannot read the site,
+and is an item. No answer or another status reads `unknown` and raises
+nothing. The result is under `checks.edge_gate` in the run status: `state`
+(`ok`, `open`, `key refused`, `no key` or `unknown`), `status` and
+`challenged` for the request without the key, and `keyed_status` for the one
+with it; the key itself is never recorded. A smoke test the edge refused
+reads `unverifiable` and raises no item of its own, so a refused key is
+reported once, here. The issue and GitHub's email carry these items; the
+Worker's daily check does not read them.
 
 ## What each item means
 
@@ -174,4 +195,7 @@ in the run status, with `etag`, `beacons` and `content_encoding`.
 | Restored from the weekly snapshot | Both nightly backups were missing or damaged | Find out what removed or damaged them; nothing to restore by hand |
 | Expiry check: a token expires or is not active | The token was made with an end date, or was disabled | Make a new token with the same permissions and replace the repository secret |
 | Expiry check: the domain expires | The registration is close to its end | Check auto-renew and the payment method in the dashboard's Registrar section |
-| Cloudflare is rewriting the site's HTML again | The Web Analytics site was switched to its automatic setup, or Email Obfuscation, Automatic HTTPS Rewrites or Replace insecure JavaScript was turned on | Web Analytics, lmiawatch.ca, Manage site: "Enable with JS Snippet installation"; turn the three zone features off. Check with `curl -sI -H 'Accept: text/html' https://lmiawatch.ca/`, which must show an `etag` |
+| Cloudflare is rewriting the site's HTML again | The Web Analytics site was switched to its automatic setup, or Email Obfuscation, Automatic HTTPS Rewrites or Replace insecure JavaScript was turned on | Web Analytics, lmiawatch.ca, Manage site: "Enable with JS Snippet installation"; turn the three zone features off. Check with `curl -sI -H 'Accept: text/html' -H "x-lmiawatch-check: $KEY" https://lmiawatch.ca/` (`$KEY` holding the check key; without it the edge answers 403), which must show an `etag` |
+| The edge challenge is off | A browser-like request without the check key got the home page: the rule `challenge` was removed, switched off or changed in the dashboard, or a later `--apply` ran with `--without-challenge` | `python pipeline/scripts/edge_rules.py --token-file <token file> --key-file <key file> --check` names the difference; `--apply` puts the four rules back (`docs/traffic-limits.md`, section 1). Security, WAF, Custom rules in the dashboard shows what is on the zone now |
+| The edge refused the run's check key | The secret `EDGE_CHECK_KEY` and the key in the rule `check_key` differ (a rotation half done, or a rule edited by hand) | `--check` with the key from the secret: "rule check_key: expression differs" confirms it. Apply the rules with the key in the secret, or set the secret to the key in the rule. Until then the smoke test reads `unverifiable` and the HTML check `unknown` |
+| EDGE_CHECK_KEY is not set for the run | The repository secret is missing, empty, or not 64 lower-case hex characters (a malformed key is never sent) | Set the secret to the key in the rule (`docs/traffic-limits.md`, section 1, "The check key"); if that key is lost, make a new one and apply the rules with it |

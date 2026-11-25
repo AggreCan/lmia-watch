@@ -37,8 +37,12 @@
 #   a run that fails whenever anything could not be confirmed.
 #
 # Secrets: CLOUDFLARE_SITE_DEPLOY_TOKEN (docs/site-deploy.md lists its
-# permissions), CLOUDFLARE_ACCOUNT_ID (the one the nightly uses). Variables:
-# SITE_URL, CONTACT (the user agent of the checks).
+# permissions), CLOUDFLARE_ACCOUNT_ID (the one the nightly uses),
+# EDGE_CHECK_KEY (the key the zone's first WAF rule names, the nightly's
+# secret, docs/traffic-limits.md: the bundle checks and the smoke test send it
+# so the edge's challenge lets them read the live site; only the steps that
+# run them receive it). Variables: SITE_URL, CONTACT (the user agent of the
+# checks).
 
 name: deploy-site
 
@@ -153,6 +157,8 @@ jobs:
       # any difference, missing file or answer other than 200 stops the run
       # here, before anything is copied.
       - name: Unpack the bundle and check it against the live site
+        env:
+          EDGE_CHECK_KEY: ${{ secrets.EDGE_CHECK_KEY }}
         run: |
           rm -rf "$WORK/bundle"
           mkdir -p "$WORK/bundle"
@@ -189,6 +195,8 @@ jobs:
       # check would show here), and the live stats.json kept byte for byte
       # for the check after the deploy. Written only when every file matched.
       - name: Check again and keep the live stats.json
+        env:
+          EDGE_CHECK_KEY: ${{ secrets.EDGE_CHECK_KEY }}
         run: |
           python -m lmia_pipeline.nightly site-bundle-check --bundle site/public/data --base-url "$SITE" \
             --keep-live-stats "$WORK/stats.before.json" --title "Just before the deploy: the site's data against the live site"
@@ -220,6 +228,8 @@ jobs:
         if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 5
+        env:
+          EDGE_CHECK_KEY: ${{ secrets.EDGE_CHECK_KEY }}
         run: |
           python -m lmia_pipeline.nightly smoke --base-url "$SITE" --stats site/public/data/stats.json --out "$WORK/smoke.json"
 
@@ -232,6 +242,8 @@ jobs:
         if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 5
+        env:
+          EDGE_CHECK_KEY: ${{ secrets.EDGE_CHECK_KEY }}
         run: |
           python -m lmia_pipeline.nightly site-bundle-check --bundle site/public/data --base-url "$SITE" \
             --saved-stats "$WORK/stats.before.json" --title "After the deploy: the site's data against the live site and the stats.json kept before"

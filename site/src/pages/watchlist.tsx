@@ -33,7 +33,8 @@ export function watchlistClientData(lang: Lang) {
   return { lang, locale: numberLocale(lang), max: WATCH_MAX, strings: clientStrings(lang, WATCHLIST_CLIENT_KEYS) };
 }
 
-function watchlistSeo(lang: Lang): Seo {
+// Exported for the head a link preview gets (preview.ts).
+export function watchlistSeo(lang: Lang): Seo {
   const name = t(lang, "watch.title");
   return { path: "/watchlist", title: pageTitle(name), socialTitle: name, description: t(lang, "watch.description"), image: SOCIAL_CARD };
 }

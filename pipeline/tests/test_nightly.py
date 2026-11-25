@@ -560,3 +560,28 @@ def test_the_workflow_records_the_worker_cpu_after_the_roll_up_and_saves_the_fil
     assert ("python -m lmia_pipeline.nightly worker-cpu-line --status data/out/status.json "
             "> data/out/worker_cpu_line.txt 2>/dev/null || true") in record
     assert "cat data/out/worker_cpu_line.txt >> LAST_RUN.md" in record
+
+
+def code_only(text):
+    return "\n".join(line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#"))
+
+
+def test_the_check_key_reaches_only_the_steps_that_read_the_live_site():
+    """The smoke test and the nightly checks send EDGE_CHECK_KEY to the site;
+    no other step, and no job's environment, gets the secret. IndexNow's key
+    file check stays without it, as the engines fetch that file."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    key_line = "EDGE_CHECK_KEY: ${{ secrets.EDGE_CHECK_KEY }}"
+    readers = []
+    for step in re.split(r"\n      - ", text)[1:]:
+        code = code_only(step)
+        name = step.splitlines()[0]
+        reads_site = re.search(r"lmia_pipeline\.nightly (smoke|checks|site-bundle-check)\s", code) is not None
+        assert (key_line in code) == reads_site, name
+        if reads_site:
+            readers.append(name)
+    assert readers == ["name: Check the live site", "name: Nightly HTML and edge checks and monthly expiry checks"]
+    assert [line.strip() for line in code_only(text).splitlines() if "EDGE_CHECK_KEY" in line] == [key_line] * 2
+    # The header lists the secret with the others.
+    header = text.split("\nname: nightly\n", 1)[0]
+    assert "EDGE_CHECK_KEY (64 lower-case hex characters" in header

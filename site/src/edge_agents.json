@@ -1,0 +1,23 @@
+{
+  "refused": [
+    "shapbot", "claudebot", "anthropic-ai", "gptbot", "ccbot", "bytespider", "amazonbot", "meta-externalagent",
+    "facebookbot", "cohere-ai", "diffbot", "imagesiftbot", "omgili", "petalbot", "dataforseobot", "ahrefsbot",
+    "semrushbot", "mj12bot", "dotbot", "elevenlabscrawler", "tokenfoundrybot", "serankingbacklinksbot", "blexbot",
+    "barkrowler", "serpstatbot", "zoominfobot", "megaindex", "seokicks", "rogerbot"
+  ],
+  "tools": [
+    "lightpanda", "headlesschrome", "phantomjs", "puppeteer", "playwright", "selenium", "python-requests",
+    "python-urllib", "python-httpx", "aiohttp", "scrapy", "go-http-client", "node-fetch", "undici", "axios/",
+    "okhttp", "apache-httpclient", "java/", "libwww-perl", "wget/", "curl/", "postmanruntime", "guzzlehttp",
+    "colly", "httrack", "mechanize"
+  ],
+  "preview": [
+    "facebookexternalhit", "facebot", "twitterbot", "whatsapp/", "telegrambot", "discordbot", "slackbot",
+    "slack-imgproxy", "linkedinbot", "redditbot", "cardyb", "mastodon/", "pleroma", "akkoma", "misskey",
+    "skypeuripreview", "iframely", "embedly", "pinterestbot", "hatchfeed"
+  ],
+  "verified_categories": [
+    "Search Engine Crawler", "AI Search", "AI Assistant", "Page Preview", "Archiver", "Feed Fetcher",
+    "Monitoring & Analytics", "Accessibility", "Security", "Academic Research", "Webhooks"
+  ]
+}

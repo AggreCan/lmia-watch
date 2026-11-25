@@ -82,7 +82,8 @@ export async function loadFeedIndex(c: Context<AppEnv>): Promise<FeedIndex | nul
   return { ...index, feeds };
 }
 
-function feedsSeo(lang: Lang): Seo {
+// Exported for the head a link preview gets (preview.ts).
+export function feedsSeo(lang: Lang): Seo {
   const name = t(lang, "feeds.title");
   return { path: "/feeds", title: pageTitle(name), socialTitle: name, description: t(lang, "feeds.description"), image: SOCIAL_CARD };
 }

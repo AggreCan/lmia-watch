@@ -1,4 +1,5 @@
 import type { Context, Next } from "hono";
+import edgeAgents from "./edge_agents.json";
 import type { AppEnv } from "./env";
 import { DOWNLOADS } from "./pages/data";
 
@@ -136,13 +137,18 @@ export type Device = "desktop" | "mobile" | "tablet" | "";
 // Words that crawlers, link previews, monitors and scripts put in their user
 // agents. "bot" is not matched inside "Cubot", a phone maker whose model names
 // appear in ordinary Android user agents. "lmiawatch" is the site's own
-// client (the nightly smoke test and key check).
+// client (the nightly smoke test and key check). The link-preview names the
+// edge lets through unverified (edge_agents.json) are all here too, since
+// the Worker answers them with a page's head (limits.ts) and some write a
+// browser's agent around their own name (iMessage), so each counts as a bot
+// whatever headers come with it.
 const BOT_UA = new RegExp(
   [
     "(?<!cu)bot", "crawl", "spider", "slurp", "fetch", "python-requests", "curl", "wget", "headless", "lmiawatch",
     "http-client", "okhttp", "axios", "libwww", "scrapy", "httpx", "aiohttp", "java/", "facebookexternalhit",
     "embedly", "whatsapp", "preview", "lighthouse", "pingdom", "uptime", "monitor", "archiver", "validator",
     "googleother", "google-", "feed", "rss", "phantomjs", "selenium", "puppeteer", "playwright",
+    ...edgeAgents.preview.map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
   ].join("|"),
   "i",
 );

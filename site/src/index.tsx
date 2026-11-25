@@ -8,7 +8,7 @@ import { loadStats } from "./data";
 import { pageCache } from "./pagecache";
 import type { AppEnv, Env } from "./env";
 import { kofiWebhook } from "./hooks";
-import { refuseAutomatedBrowser, throttle } from "./limits";
+import { previewHead, refuseAutomatedBrowser, throttle } from "./limits";
 import { measure } from "./views";
 import { runWatchdog } from "./watchdog";
 import { langFrom, t, tj } from "./i18n";
@@ -79,6 +79,9 @@ app.use("*", throttle);
 app.use("*", measure);
 // Inside measure, so a refused automated browser is counted (limits.ts).
 app.use("*", refuseAutomatedBrowser);
+// Inside measure, so each head a link preview gets is counted, and before
+// the two below, so the head never goes through the page cache (limits.ts).
+app.use("*", previewHead);
 // Inside measure, so a page answered 304 is counted with that status.
 app.use("*", conditional);
 // Inside conditional, which answers a cached page's stored ETag with a 304,

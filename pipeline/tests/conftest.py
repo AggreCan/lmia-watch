@@ -34,6 +34,13 @@ class FakeSession:
         return FakeResponse(200, value)
 
 
+@pytest.fixture(autouse=True)
+def _no_edge_check_key(monkeypatch):
+    # A shell that holds the real key (to run edge_rules.py) must not lend it
+    # to the tests: a test that wants a key sets its own.
+    monkeypatch.delenv("EDGE_CHECK_KEY", raising=False)
+
+
 @pytest.fixture
 def conn():
     c = connect(memory=True)

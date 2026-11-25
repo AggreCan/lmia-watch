@@ -425,7 +425,8 @@ function summary(lang: Lang, d: ProgramFile): string[] {
 
 // -- the handler -------------------------------------------------------------------------
 
-function seo(lang: Lang): Seo {
+// Exported for the head a link preview gets (preview.ts).
+export function programSeo(lang: Lang): Seo {
   const title = t(lang, "program.seo_title");
   return {
     path: "/program",
@@ -457,7 +458,7 @@ export async function programPage(c: Context<AppEnv>): Promise<Response> {
   const facts = summary(lang, data);
   return page(
     c,
-    <Layout lang={lang} title={t(lang, "program.h1")} dataAsOf={stats.data_as_of} seo={seo(lang)}>
+    <Layout lang={lang} title={t(lang, "program.h1")} dataAsOf={stats.data_as_of} seo={programSeo(lang)}>
       <Breadcrumb lang={lang} trail={trail} />
       <h1>{t(lang, "program.h1")}</h1>
       <p class="lead">{t(lang, "program.lead")}</p>

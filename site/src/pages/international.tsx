@@ -470,7 +470,8 @@ const RegistersSection: FC<{ lang: Lang; rows: RegisterRow[] }> = ({ lang, rows 
 
 // -- the handler ---------------------------------------------------------------------------
 
-function seo(lang: Lang): Seo {
+// Exported for the head a link preview gets (preview.ts).
+export function internationalSeo(lang: Lang): Seo {
   const title = t(lang, "intl.seo_title");
   return {
     path: "/international",
@@ -494,7 +495,7 @@ export async function internationalPage(c: Context<AppEnv>): Promise<Response> {
     // Missing (no pass yet) or unreadable: the page says so and guesses at nothing.
     return page(
       c,
-      <Layout lang={lang} title={t(lang, "intl.h1")} dataAsOf={stats.data_as_of} active="/international" seo={seo(lang)}>
+      <Layout lang={lang} title={t(lang, "intl.h1")} dataAsOf={stats.data_as_of} active="/international" seo={internationalSeo(lang)}>
         <h1>{t(lang, "intl.h1")}</h1>
         <p class="lead">{t(lang, "intl.lead")}</p>
         <p>{t(lang, "intl.not_published")}</p>
@@ -508,7 +509,7 @@ export async function internationalPage(c: Context<AppEnv>): Promise<Response> {
   const listUrl = lang === "fr" ? d.high_wage.source_url_fr : d.high_wage.source_url;
   return page(
     c,
-    <Layout lang={lang} title={t(lang, "intl.h1")} dataAsOf={stats.data_as_of} active="/international" seo={seo(lang)}>
+    <Layout lang={lang} title={t(lang, "intl.h1")} dataAsOf={stats.data_as_of} active="/international" seo={internationalSeo(lang)}>
       <h1>{t(lang, "intl.h1")}</h1>
       <p class="lead">{t(lang, "intl.lead")}</p>
       <p>{t(lang, "intl.is_not")}</p>

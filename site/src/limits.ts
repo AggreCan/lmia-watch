@@ -1,7 +1,10 @@
 import type { Context, Next } from "hono";
+import edgeAgents from "./edge_agents.json";
 import type { AppEnv, Env } from "./env";
 import { t } from "./i18n";
+import { previewDocument, previewSeo } from "./preview";
 import { absoluteUrl } from "./seo";
+import { routeTemplate } from "./views";
 
 // Which cap a request falls under. The API and the downloads get their own
 // because a script can hammer them without ever looking like a visitor; form
@@ -43,6 +46,7 @@ export const AI_CRAWLERS: readonly string[] = [
   "applebot", "claude-searchbot", "claudebot", "anthropic-ai", "oai-searchbot", "gptbot", "perplexitybot", "amzn-searchbot", "meta-webindexer",
   "exasearchbot", "exabot", "keenablebot", "epochal-search", "reflectionbot", "youbot", "duckassistbot", "timpibot", "ai2bot", "bytespider",
   "amazonbot", "ccbot", "meta-externalagent", "facebookbot", "cohere-ai", "diffbot", "imagesiftbot", "omgili", "petalbot",
+  "elevenlabscrawler", "tokenfoundrybot",
 ];
 
 // The crawler a user agent names, as its token; null for a reader, a search
@@ -82,6 +86,63 @@ function edgeCategory(c: Context<AppEnv>): unknown {
   return (c.req.raw as Request & { cf?: { verifiedBotCategory?: unknown } }).cf?.verifiedBotCategory;
 }
 
+// -- link previews ----------------------------------------------------------------------------
+//
+// The zone's edge rules (pipeline/scripts/edge_rules.py) challenge every
+// client Cloudflare cannot verify, except the link-preview fetchers named in
+// edge_agents.json, which rule `welcome` lets through by name alone. A person
+// who shares a link in WhatsApp or iMessage has the preview fetched by their
+// own phone, and a Mastodon server fetches it for its users: nobody can
+// verify either, and a check would leave the link with no card. Since anyone
+// can write those names, the name must be worth nothing to a scraper, so an
+// unverified request under one of them gets the page's head only (title,
+// description, card image), which is all a preview reads, and never the
+// records. A preview fetcher Cloudflare has verified (Meta's, Slack's) gets
+// the full page as any verified crawler does. Each name also has a budget of
+// its own on CRAWLER_LIMIT, like an AI crawler, so a flood under one answers
+// 429 before anything is read.
+const PREVIEW_AGENTS: readonly string[] = edgeAgents.preview;
+
+// The preview fetcher a user agent names, as its token from edge_agents.json; null for anything else.
+export function previewOf(userAgent: string | undefined): string | null {
+  const ua = (userAgent ?? "").toLowerCase();
+  if (!ua) return null;
+  return PREVIEW_AGENTS.find((token) => ua.includes(token)) ?? null;
+}
+
+// The preview fetcher's token when this request is one the Worker answers
+// with the head: a GET or HEAD for a page, under a preview fetcher's name,
+// that the edge has not verified (an empty or missing category). The
+// response form keeps its own answer for clients that are not browsers
+// (forms.tsx).
+export function previewRequest(c: Context<AppEnv>): string | null {
+  const method = c.req.method;
+  if (method !== "GET" && method !== "HEAD") return null;
+  const name = previewOf(c.req.header("user-agent"));
+  if (!name) return null;
+  const { route, kind } = routeTemplate(method, c.req.path);
+  if (kind !== "page" || route === "/employers/:id/respond") return null;
+  const category = edgeCategory(c);
+  if (typeof category === "string" && category.trim() !== "") return null;
+  return name;
+}
+
+// Registered inside the measure middleware, so each head is counted (a bot's
+// page view, views.ts), and before the conditional and page-cache
+// middleware, so the head is never stored as the page or the page sent as
+// the head. An employer id with no profile goes on to the page, which
+// redirects a retired id and answers the rest with its 404.
+export async function previewHead(c: Context<AppEnv>, next: Next): Promise<Response | void> {
+  if (!previewRequest(c)) return next();
+  const lang = c.get("lang") ?? "en";
+  const seo = await previewSeo(c, new URL(c.req.url).pathname, lang);
+  if (!seo) return next();
+  c.header("Cache-Control", "public, max-age=300");
+  // The page at the same address differs by agent, so no shared cache may hand this one to a browser.
+  c.header("Vary", "User-Agent");
+  return c.html(previewDocument(seo, lang), 200);
+}
+
 const BINDING: Record<Bucket, keyof Env> = {
   page: "PAGE_LIMIT", api: "API_LIMIT", download: "DOWNLOAD_LIMIT", form: "FORM_LIMIT", feed: "FEED_LIMIT",
 };
@@ -97,7 +158,9 @@ export async function throttle(c: Context<AppEnv>, next: Next): Promise<Response
   // past it is a few bytes, and its addresses are never counted one by one.
   // The routes made for machines (machineRoute below) stay open to it, so a
   // crawler past its budget can still read the rules, the map and the files.
-  const crawler = crawlerOf(c.req.header("user-agent"));
+  // An unverified link preview asking for a page is held to the same budget
+  // under its own name (previewRequest above).
+  const crawler = crawlerOf(c.req.header("user-agent")) ?? previewRequest(c);
   if (crawler && c.env.CRAWLER_LIMIT && !machineRoute(c.req.path)) {
     let within = true;
     try {

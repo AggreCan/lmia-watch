@@ -82,7 +82,8 @@ function periodsText(periods: string[], lang: Lang): string {
   return t(lang, "rank.covers_list", { periods: periods.map((p) => periodLabel(p, lang)).join(", ") });
 }
 
-function rankingSeo(year: string | null, lang: Lang): Seo {
+// Exported for the head a link preview gets (preview.ts).
+export function rankingSeo(year: string | null, lang: Lang): Seo {
   const title = year ? t(lang, "rank.seo_title_year", { year }) : t(lang, "rank.seo_title_all");
   const crumbs = [{ name: t(lang, "common.home"), path: "/" }, ...(year ? [{ name: t(lang, "rank.title"), path: "/rankings" }, { name: year }] : [{ name: t(lang, "rank.title") }])];
   return {

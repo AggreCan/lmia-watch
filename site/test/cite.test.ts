@@ -95,13 +95,42 @@ describe("statements on the Data and Support pages", () => {
     const en = await get("/data", fakeAssets);
     expect(en).toContain("The site sets no cookie for these counts and keeps no IP address.");
     expect(en).toContain("The one measuring script the pages load in the browser is Cloudflare Web Analytics, which records each page view");
-    expect(en).toContain("Cloudflare states that it sets no cookie, stores nothing in the browser and does not fingerprint visitors by their IP address");
+    expect(en).toContain("Cloudflare states that this script sets no cookie, stores nothing in the browser and does not fingerprint visitors by their IP address");
     expect(en).not.toContain("runs no tracking script");
     const fr = (await get("/data?lang=fr", fakeAssets)).replace(/[  ]/g, " ");
     expect(fr).toContain("Le site ne dépose aucun témoin pour ces comptes et ne conserve aucune adresse IP.");
     expect(fr).toContain("Le seul script de mesure que les pages chargent dans le navigateur est Cloudflare Web Analytics, qui enregistre chaque page vue");
     expect(fr).toContain("Selon Cloudflare, ce script ne dépose aucun témoin, ne conserve rien dans le navigateur et n’établit aucune empreinte numérique des visiteurs");
     expect(fr).not.toContain("aucun script de suivi");
+  });
+
+  it("names the cookie Cloudflare's browser check sets, and says the site reads nothing from it, in both languages", async () => {
+    const en = await get("/data", fakeAssets);
+    // Once under About, once in the note on how visits are counted.
+    expect(en.split("cf_clearance").length - 1).toBe(2);
+    expect(en).toContain(
+      "The site has no visitor accounts and sets no tracking cookies. Before the pages are shown, Cloudflare, the network that carries the site, " +
+        "checks that a visitor&#39;s browser is a real browser, usually without the visitor doing anything; when the check passes, it sets a cookie " +
+        "named cf_clearance that records the pass, so the check is not repeated on every page. The site reads nothing from that cookie and sets none " +
+        "of its own for counting.",
+    );
+    expect(en).toContain(
+      "Before the pages are shown, Cloudflare, the network that carries the site, also checks that a visitor&#39;s browser is a real browser, " +
+        "usually without the visitor doing anything; when the check passes, it sets a cookie named cf_clearance that records the pass, so the check " +
+        "is not repeated on every page. The site reads nothing from that cookie and still sets none of its own for these counts.",
+    );
+    const fr = (await get("/data?lang=fr", fakeAssets)).replace(/[  ]/g, " ");
+    expect(fr.split("cf_clearance").length - 1).toBe(2);
+    expect(fr).toContain(
+      "Le site n’a pas de comptes de visiteurs et ne dépose aucun témoin de suivi. Avant d’afficher les pages, Cloudflare, le réseau qui achemine " +
+        "le site, vérifie que le navigateur du visiteur est un vrai navigateur, le plus souvent sans que le visiteur ait quoi que ce soit à faire; si " +
+        "la vérification réussit, il dépose un témoin nommé cf_clearance qui en garde la trace, pour que la vérification ne soit pas répétée à chaque " +
+        "page. Le site ne lit rien de ce témoin et n’en dépose aucun de son côté pour compter les visites.",
+    );
+    expect(fr).toContain(
+      "Avant d’afficher les pages, Cloudflare, le réseau qui achemine le site, vérifie aussi que le navigateur du visiteur est un vrai navigateur",
+    );
+    expect(fr).toContain("Le site ne lit rien de ce témoin et ne dépose toujours aucun témoin de son côté pour ces comptes.");
   });
 
   it("notes that the Bluesky post is free", async () => {

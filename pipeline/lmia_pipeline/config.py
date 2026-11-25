@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+from typing import Mapping
+from urllib.parse import urlsplit
 
 from . import __version__
 
@@ -24,6 +27,41 @@ PACKAGE_DATA = Path(__file__).resolve().parent / "data"
 SITE_URL = os.environ.get("LMIAWATCH_SITE_URL", "https://lmiawatch.example")
 CONTACT = os.environ.get("LMIAWATCH_CONTACT", f"{SITE_URL}/corrections")
 USER_AGENT = f"LMIAWatch/{__version__} (+{SITE_URL}; {CONTACT})"
+
+# The zone's WAF challenges every request it cannot vouch for, the run's own
+# checks of the live site included, unless the request carries this header
+# with the key the first rule names (pipeline/scripts/edge_rules.py,
+# CHECK_HEADER, kept equal by a test). The key is the repository secret
+# EDGE_CHECK_KEY. Anyone holding it skips the challenge, so it goes to the
+# site's own host over HTTPS and nowhere else, and is never logged.
+EDGE_CHECK_HEADER = "x-lmiawatch-check"
+EDGE_CHECK_ENV = "EDGE_CHECK_KEY"
+EDGE_CHECK_KEY_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def edge_check_key(env: Mapping[str, str] | None = None) -> str | None:
+    """The check key, or None when it is not set or is not 64 lower-case hex
+    characters (a malformed secret is never sent)."""
+    raw = ((os.environ if env is None else env).get(EDGE_CHECK_ENV) or "").strip()
+    return raw if EDGE_CHECK_KEY_RE.fullmatch(raw) else None
+
+
+def edge_check_headers(url: str, site_url: str | None = None, env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """{EDGE_CHECK_HEADER: key} for an https URL on the site's host (that of
+    site_url, else SITE_URL, or www. of it) when the key is set; {} for any
+    other URL, so a request to another host never carries it."""
+    key = edge_check_key(env)
+    if key is None:
+        return {}
+    try:
+        site = (urlsplit(site_url or SITE_URL).hostname or "").lower()
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+    except (TypeError, ValueError):
+        return {}
+    if not site or parts.scheme != "https" or host not in (site, f"www.{site}"):
+        return {}
+    return {EDGE_CHECK_HEADER: key}
 
 # robots.txt on jobbank.gc.ca sets Crawl-delay: 5. Everything else gets one
 # request per second, which is well under what the open-data hosts expect.

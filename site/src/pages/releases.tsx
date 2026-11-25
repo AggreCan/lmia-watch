@@ -231,13 +231,10 @@ export const BreakdownTable: FC<{
 
 // -- the release list ----------------------------------------------------------------
 
-export async function releasesIndexPage(c: Context<AppEnv>): Promise<Response> {
-  const lang = c.get("lang");
-  const [stats, index] = await Promise.all([loadStats(c.env), loadJson<unknown>(c.env, "releases/index.json")]);
-  if (!isReleaseIndex(index)) return noDataPage(c, "rel.index_title");
-  const n = (v: number) => fmtInt(v, lang);
+// Exported for the head a link preview gets (preview.ts).
+export function releasesIndexSeo(lang: Lang): Seo {
   const title = t(lang, "rel.index_title");
-  const seo: Seo = {
+  return {
     path: "/releases",
     title: pageTitle(title),
     socialTitle: title,
@@ -245,6 +242,15 @@ export async function releasesIndexPage(c: Context<AppEnv>): Promise<Response> {
     image: SOCIAL_CARD,
     jsonLd: [breadcrumbJsonLd([{ name: t(lang, "common.home"), path: "/" }, { name: t(lang, "rel.crumb") }])],
   };
+}
+
+export async function releasesIndexPage(c: Context<AppEnv>): Promise<Response> {
+  const lang = c.get("lang");
+  const [stats, index] = await Promise.all([loadStats(c.env), loadJson<unknown>(c.env, "releases/index.json")]);
+  if (!isReleaseIndex(index)) return noDataPage(c, "rel.index_title");
+  const n = (v: number) => fmtInt(v, lang);
+  const title = t(lang, "rel.index_title");
+  const seo = releasesIndexSeo(lang);
   return page(
     c,
     <Layout lang={lang} title={title} dataAsOf={stats?.data_as_of ?? null} seo={seo}>

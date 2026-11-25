@@ -24,7 +24,9 @@ one, and always leaves a status file the site's daily check can read.
             for a rollback.
   smoke     fetch the live site after a deploy: verdict ok, broken or
             unverifiable (resilience.smoke).
-  checks    the monthly expiry checks of the tokens and the domain.
+  checks    every night the HTML check and the edge check of the live site;
+            on the first of a month also the expiry checks of the tokens
+            and the domain.
   attention list the items needing attention and write the GitHub issue's
             texts; exits 1 when there are any. The run's notices are
             printed beside them and never counted.
@@ -52,6 +54,10 @@ The R2 transfers stay in the workflow, apart from the weekly snapshot's
 listing and download, which Wrangler has no command for; these commands read
 the files the workflow leaves. verify, status, gate, live-version, smoke and
 checks report what they find in their output and never stop the run.
+
+smoke, checks and site-bundle-check read the live site, whose edge
+challenges any request it cannot vouch for; they send the key in
+EDGE_CHECK_KEY (config.edge_check_headers) and never print it.
 """
 
 from __future__ import annotations
@@ -390,8 +396,8 @@ def run_status(
     The resilience fields: steps (every workflow step's outcome, which the
     retry gate reads), restore (where the database came from), smoke (the
     check of the live site after the deploy), rollback and deploy_rolled_back
-    (what was done about a broken deploy) and checks (the monthly expiry
-    checks). A broken deploy marks the run not ok whether or not it was
+    (what was done about a broken deploy) and checks (the nightly HTML and
+    edge checks and the monthly expiry checks). A broken deploy marks the run not ok whether or not it was
     rolled back, so a retry trigger the same day deploys again."""
     stages: list[dict[str, Any]] = []
     notices: list[dict[str, str]] = []
@@ -719,9 +725,11 @@ def main(argv: list[str] | None = None) -> int:
     sm.add_argument("--out", required=True)
     sm.add_argument("--settle", type=float, default=resilience.SMOKE_SETTLE_S,
                     help="seconds to wait before the first request")
-    ck = sub.add_parser("checks", help="the nightly HTML check, plus the expiry checks on the first day of a month (UTC)")
+    ck = sub.add_parser("checks", help="the nightly HTML and edge checks, plus the expiry checks on the first day "
+                                       "of a month (UTC)")
     ck.add_argument("--today", required=True, help="today's UTC date, YYYY-MM-DD")
-    ck.add_argument("--site-url", default=config.SITE_URL, help="the live site, whose home page the HTML check reads")
+    ck.add_argument("--site-url", default=config.SITE_URL,
+                    help="the live site, whose home page the HTML and edge checks read")
     ck.add_argument("--domain", default=None,
                     help="the domain whose registrar record is read (default: the host of --site-url)")
     ck.add_argument("--out", required=True)
@@ -881,7 +889,7 @@ def _checks(args: argparse.Namespace) -> int:
     _write_json(Path(args.out), result)
     if not result["monthly"]:
         log.info("checks: the expiry checks are not due (they run on the first day of a month)")
-    for name in ("html_rewrite", "deploy_token", "analytics_token", "domain"):
+    for name in ("html_rewrite", "edge_gate", "deploy_token", "analytics_token", "domain"):
         if name not in result:
             continue
         entry = result[name] or {}

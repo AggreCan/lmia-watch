@@ -70,7 +70,11 @@ mistaken command in the workflow is refused by Cloudflare. The first step
 fails at once, before anything is installed, when the secret is empty; there
 is no fallback to another token. The token is handed only to the steps that
 call Wrangler, so `npm ci` and the pipeline install never see it.
-`CLOUDFLARE_ACCOUNT_ID` is the secret the nightly already uses.
+`CLOUDFLARE_ACCOUNT_ID` is the secret the nightly already uses. So is
+`EDGE_CHECK_KEY`, the key that lets the run's checks past the edge's
+challenge (`docs/traffic-limits.md`, section 1); only the four steps that
+fetch the live site receive it (the two bundle checks before the deploy, the
+smoke test and the data check after it), and it grants no write anywhere.
 
 ### Secondary: no write command in the workflow
 
@@ -95,7 +99,8 @@ workflows; a line runs `r2 object put`, `r2 object delete`, `r2 bucket`, a
 writes state (`pack`, `status`, `attention`, `gate` and the others), `git`,
 `curl`, `npx` or the Cloudflare API directly; a Wrangler call is anything but
 the four forms above through the pinned binary; any secret other than the
-two above is read; or `CLOUDFLARE_API_TOKEN` (the variable Wrangler reads) is
+three above is read, or the check key reaches a step that does not fetch the
+live site; or `CLOUDFLARE_API_TOKEN` (the variable Wrangler reads) is
 set from anything but the site deploy token. It also plants each of those
 changes in a copy of the file and checks that the guard catches it. The
 checks are textual: PyYAML is not a dependency of the pipeline.
@@ -186,7 +191,7 @@ it reads nothing this run writes. Remember that the change is still on
 |---|---|---|
 | Check the deploy token and the branch | The secret is missing, or the run was started from another branch | Add the secret (above), or start it from `main` |
 | Download the static bundle from R2 | `static.tar.gz` is not in R2, or R2 refused the token | A permission error: add Workers R2 Storage Read. A missing archive: wait for a nightly run |
-| Unpack the bundle and check it | The archive is not what the site serves: the last nightly deployed but its save to R2 failed, or something was deployed since | Nothing was deployed. Wait for the next nightly run, which deploys `main` with fresh data |
+| Unpack the bundle and check it | The archive is not what the site serves: the last nightly deployed but its save to R2 failed, or something was deployed since. Every file "answered 403" means the edge refused the check key instead | Nothing was deployed. Wait for the next nightly run, which deploys `main` with fresh data. For a 403, make the secret `EDGE_CHECK_KEY` and the WAF rule agree (`docs/traffic-limits.md`, section 1) and start it again |
 | Record the live Worker version | Wrangler could not read the deployments | Nothing was deployed. Check the token's Workers Scripts permission |
 | Check again and keep the live stats.json | The site's data changed between the two checks | Nothing was deployed. Start it again |
 | Deploy the Worker | Wrangler failed three times. The run rolls back in case a try went part of the way | Read the deploy log; a permission error names the permission to add |

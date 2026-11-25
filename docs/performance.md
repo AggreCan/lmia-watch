@@ -4,7 +4,9 @@ The Workers Paid plan includes 30 million CPU milliseconds a month and bills
 past that. This page records what the Worker spends its CPU on, the changes
 of 2026-11-14 that cut it (a cache of rendered pages, Smart Placement, a
 cheaper start-up and a cheaper data load), how to read CPU time in
-Cloudflare's analytics, and how to check the changes after a deploy.
+Cloudflare's analytics, and how to check the changes after a deploy. The
+zone's edge rules (`docs/traffic-limits.md`, section 1) now turn most scraper
+requests away before the Worker runs, so those cost the Worker no CPU.
 
 ## Baseline (2026-11-13)
 
@@ -154,10 +156,12 @@ Metrics page shows the same CPU time without the start-up split.
 
 Fetch one profile twice, as a browser would (a bare `curl` does not see the
 edge's HTML handling), and read the headers. The cache answers `GET` only,
-so dump the headers of a `GET` rather than sending `HEAD` with `curl -I`:
+so dump the headers of a `GET` rather than sending `HEAD` with `curl -I`.
+The edge challenges a browser it has not checked, so send the check key
+(`docs/traffic-limits.md`, section 1; `$KEY` holding it):
 
 ```
-curl -s -o /dev/null -D - -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36" -H "Accept: text/html" https://lmiawatch.ca/employers/emp-e11aad356c
+curl -s -o /dev/null -D - -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36" -H "Accept: text/html" -H "x-lmiawatch-check: $KEY" https://lmiawatch.ca/employers/emp-e11aad356c
 ```
 
 The first answer should carry `x-page-cache: miss` and the second, a few

@@ -127,7 +127,9 @@ function crumbs(lang: Lang, view: View): { name: string; path?: string }[] {
   return [home, { name: t(lang, "trends.crumb"), path: "/trends" }, { name: t(lang, label) }];
 }
 
-function viewSeo(lang: Lang, view: View, first: string | null): Seo {
+// Exported for the head a link preview gets (preview.ts), which has no data
+// file to read and so no first date for the pending view.
+export function viewSeo(lang: Lang, view: View, first: string | null): Seo {
   const start = ESDC_HISTORY_START_YEAR;
   const [title, desc] = {
     national: [t(lang, "trends.seo_title", { start }), t(lang, "trends.seo_desc", { start })],

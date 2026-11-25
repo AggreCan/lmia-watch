@@ -1,6 +1,8 @@
 # LMIA Watch. Every page is open to search engines, in English and in French
 # (?lang=fr). The payment webhook, the JSON API and the response form are not
-# pages to index.
+# pages to index. Pages are served to browsers and to crawlers Cloudflare has
+# verified; any client may fetch the bulk files, the feeds, this file,
+# llms.txt and the sitemaps.
 #
 # Crawling the 160,000 profile pages gains nothing the nightly bulk files do
 # not hold: see /llms.txt for the files, their licences and the Zenodo deposit.
@@ -44,7 +46,9 @@ Allow: /map?lang=fr$
 # page counts against the request allowance that readers depend on. The site
 # holds each of these crawlers to the same pace whether or not it reads this
 # file, and answers 429 past it. A crawler reads only the group that names
-# it, so this group repeats the general rules.
+# it, so this group repeats the general rules. A crawler in this group is
+# served when Cloudflare has verified it; a client Cloudflare cannot verify
+# gets a browser check.
 User-agent: Applebot
 User-agent: Claude-SearchBot
 User-agent: OAI-SearchBot
@@ -76,6 +80,8 @@ Crawl-delay: 10
 # needed to find the records (the data is downloadable on the Data page) and
 # at their pace they use up the daily request allowance that readers depend
 # on. Assistants fetching a single page for a person are not listed here.
+# The site's edge refuses these by name (ElevenLabs documents
+# ElevenlabsCrawler as collecting pages to train generative models).
 User-agent: ShapBot
 User-agent: ClaudeBot
 User-agent: anthropic-ai
@@ -97,6 +103,16 @@ User-agent: AhrefsBot
 User-agent: SemrushBot
 User-agent: MJ12bot
 User-agent: DotBot
+User-agent: ElevenlabsCrawler
+User-agent: TokenFoundryBot
+User-agent: SERankingBacklinksBot
+User-agent: BLEXBot
+User-agent: Barkrowler
+User-agent: serpstatbot
+User-agent: ZoominfoBot
+User-agent: MegaIndex
+User-agent: SEOkicks
+User-agent: rogerbot
 Disallow: /
 
 Sitemap: https://lmiawatch.ca/sitemap.xml

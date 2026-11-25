@@ -29,9 +29,10 @@
 # the audience counts of the finished days in R2 when the analytics token
 # exists, and with the same token the Worker's CPU time per finished day,
 # append Search Console's daily figures when its key exists, write
-# the monthly audience report on the first run of a month, run the monthly
-# expiry checks on the first of a month, write the run status, and report the
-# items needing attention (failed run, one GitHub issue).
+# the monthly audience report on the first run of a month, check the site's
+# HTML and its edge gate every night and the expiry dates on the first of a
+# month, write the run status, and report the items needing attention (failed
+# run, one GitHub issue).
 #
 # What a failure does (lmia_pipeline/nightly.py and resilience.py hold the
 # checks):
@@ -94,8 +95,13 @@
 # it the roll-up does nothing and the CPU record reports "no credentials");
 # GSC_SERVICE_ACCOUNT_JSON (a Google service account's JSON key, added as a
 # user of the Search Console property; without it the import reports "no
-# credentials"). The Worker secret VIEWS_SALT_KEY (the daily visitor code) is
-# set with wrangler, not here; the roll-up counts no unique visitors without it.
+# credentials"); EDGE_CHECK_KEY (64 lower-case hex characters, the key the
+# zone's first WAF rule names, docs/traffic-limits.md: the smoke test and the
+# nightly checks send it so the edge's challenge lets them read the live site;
+# only those two steps receive it, and without it the edge check reports
+# "no key" once the challenge is on). The Worker secret VIEWS_SALT_KEY (the
+# daily visitor code) is set with wrangler, not here; the roll-up counts no
+# unique visitors without it.
 # Variables: SITE_URL, CONTACT (the scraper's user agent); X_POST_ENABLED must be
 # "true" for the X step to run at all (X posting is pay-per-use, so it is opt-in);
 # optional X_POST_LINK, set to true to put the site link in the text (X bills a
@@ -395,18 +401,21 @@ jobs:
 
       # After a deploy that worked: the home, search and data pages and one
       # employer profile (the first of stats.json's top_approvals), fetched
-      # from outside with the pipeline's user agent, each page that fails
-      # fetched again 30 seconds later. "ok": every page 200, and home and
-      # data show tonight's data date. "broken": a page answered 500 to 599
-      # both times. "unverifiable": anything else, above all a 403 or a
-      # challenge page from the edge (the dashboard's rules may refuse a cloud
-      # address), which is never a reason to roll back. The verdict lands in
-      # the run status as smoke.
+      # from outside with the pipeline's user agent and the edge check key
+      # (the edge challenges every request it cannot vouch for), each page
+      # that fails fetched again 30 seconds later. "ok": every page 200, and
+      # home and data show tonight's data date. "broken": a page answered 500
+      # to 599 both times. "unverifiable": anything else, above all a 403 or
+      # a challenge page from the edge (a key the WAF rule does not name,
+      # which the edge check reports), which is never a reason to roll back.
+      # The verdict lands in the run status as smoke.
       - name: Check the live site
         id: smoke
         if: ${{ !cancelled() && steps.deploy.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 10
+        env:
+          EDGE_CHECK_KEY: ${{ secrets.EDGE_CHECK_KEY }}
         run: |
           mkdir -p data/out/deploy
           data_date=$(python -c 'import json, sys; print(json.load(open(sys.argv[1])).get("data_as_of") or "")' data/out/static/stats.json || true)
@@ -892,24 +901,30 @@ jobs:
           key: raw-cache-${{ github.run_id }}
 
       # Every night: the home page fetched as a browser would (an Accept
-      # naming text/html), which must come back with its ETag and exactly one
-      # Web Analytics beacon; a missing ETag or a second beacon means
-      # Cloudflare is rewriting the HTML again and is an attention item. On
-      # the first of a month (UTC), whichever run gets there, also the status
-      # and expiry date of the deploy token and of the analytics token (when
-      # set), through the API's token verify call, and the domain's
-      # registration (expiry date, auto-renew) through the registrar API. A
-      # date inside 30 days, or a token that is not active, is an attention
-      # item; an answer the token has no permission for, or no answer, is
-      # "unknown" and nothing more. The results go to the run status as
-      # checks; no token is ever printed.
-      - name: Nightly HTML check and monthly expiry checks
+      # naming text/html) with the edge check key, which must come back with
+      # its ETag and exactly one Web Analytics beacon; a missing ETag or a
+      # second beacon means Cloudflare is rewriting the HTML again and is an
+      # attention item. Then the edge check: the home page as a browser
+      # without the key, which the edge must challenge or block (a page means
+      # the challenge rule is off: an item from 2026-11-26), and with the key,
+      # which must get the page (a refusal means the secret and the WAF rule
+      # differ, and a missing key means the run's checks are challenged: an
+      # item each). On the first of a month (UTC), whichever run gets there,
+      # also the status and expiry date of the deploy token and of the
+      # analytics token (when set), through the API's token verify call, and
+      # the domain's registration (expiry date, auto-renew) through the
+      # registrar API. A date inside 30 days, or a token that is not active,
+      # is an attention item; an answer the token has no permission for, or
+      # no answer, is "unknown" and nothing more. The results go to the run
+      # status as checks; no token and no key is ever printed.
+      - name: Nightly HTML and edge checks and monthly expiry checks
         id: checks
         if: ${{ !cancelled() }}
         continue-on-error: true
         timeout-minutes: 5
         env:
           CLOUDFLARE_ANALYTICS_TOKEN: ${{ secrets.CLOUDFLARE_ANALYTICS_TOKEN }}
+          EDGE_CHECK_KEY: ${{ secrets.EDGE_CHECK_KEY }}
         run: |
           mkdir -p data/out
           python -m lmia_pipeline.nightly checks --today "$(date -u +%Y-%m-%d)" \
@@ -925,8 +940,8 @@ jobs:
       # post, the Bluesky post, the Zenodo deposit, the search database sync,
       # the audience roll-up, the Worker CPU record, the Search Console
       # import, the monthly report and the IndexNow submission, where the database
-      # came from (restore), the smoke test and any rollback, and the HTML
-      # and expiry checks. Written whatever happened above. The Bluesky, Zenodo,
+      # came from (restore), the smoke test and any rollback, and the HTML,
+      # edge and expiry checks. Written whatever happened above. The Bluesky, Zenodo,
       # search-sync, roll-up, Worker CPU, Search Console, report, IndexNow and
       # rollback steps write "failed" before they start, so a step stopped by
       # its time limit still reads as failed.

@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { app } from "../src/index";
+import edgeAgents from "../src/edge_agents.json";
 import { AI_CRAWLERS, CRAWLER_RETRY_S, SEARCH_ENGINE_CATEGORY, bucketFor, crawlerOf, machineRoute, searchEngine } from "../src/limits";
 import robotsTxt from "../public/robots.txt?raw";
 import { testEnv } from "./assets";
@@ -278,8 +279,12 @@ describe("an AI crawler's budget", () => {
     // Every crawler the file gives this group or shuts out, the Worker holds to the budget too.
     const shut = groups.find((g) => /^Disallow: \/$/m.test(g)) ?? "";
     const named = [...agents, ...shut.split("\n").filter((l) => l.startsWith("User-agent: ")).map((l) => l.slice(12))];
-    // Not budgeted: two tokens that are a preference and never a crawler, and the link-index tools, which the file shuts out and are not AI crawlers.
-    const NOT_BUDGETED = ["ShapBot", "Google-Extended", "Applebot-Extended", "DataForSeoBot", "AhrefsBot", "SemrushBot", "MJ12bot", "DotBot"];
+    // Not budgeted: two tokens that are a preference and never a crawler, and the link-index and marketing-data tools, which the file
+    // shuts out and are not AI crawlers.
+    const NOT_BUDGETED = [
+      "ShapBot", "Google-Extended", "Applebot-Extended", "DataForSeoBot", "AhrefsBot", "SemrushBot", "MJ12bot", "DotBot",
+      "SERankingBacklinksBot", "BLEXBot", "Barkrowler", "serpstatbot", "ZoominfoBot", "MegaIndex", "SEOkicks", "rogerbot",
+    ];
     for (const name of named.filter((n) => !NOT_BUDGETED.includes(n))) expect(crawlerOf(`${name}/1.0`), name).not.toBeNull();
     // The general group's rules, repeated, since a crawler reads only its own group.
     const general = (groups.find((g) => /^User-agent: \*$/m.test(g)) ?? "").split("\n").filter((l) => /^(Allow|Disallow):/.test(l));
@@ -287,6 +292,16 @@ describe("an AI crawler's budget", () => {
     expect(lines).toContain("Crawl-delay: 10");
     // The pages stay open to them.
     for (const closed of ["Disallow: /employers/", "Disallow: /occupations/", "Disallow: /places/", "Disallow: /"]) expect(lines).not.toContain(closed);
+  });
+
+  it("shuts out in robots.txt exactly the crawlers the edge refuses by name (edge_agents.json)", () => {
+    const groups = robotsTxt.split(/\n\s*\n/).filter((g) => /^User-agent:/m.test(g));
+    const shut = groups.find((g) => /^Disallow: \/$/m.test(g)) ?? "";
+    // The two tokens are a preference to the crawler that reads them, never a crawler of their own.
+    const agents = shut.split("\n").filter((l) => l.startsWith("User-agent: ")).map((l) => l.slice(12))
+      .filter((a) => a !== "Google-Extended" && a !== "Applebot-Extended").map((a) => a.toLowerCase());
+    expect([...agents].sort()).toEqual([...edgeAgents.refused].sort());
+    expect(new Set(agents).size).toBe(agents.length);
   });
 });
 

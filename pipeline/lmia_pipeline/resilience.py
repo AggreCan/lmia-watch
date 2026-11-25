@@ -14,8 +14,10 @@ nightly.py calls these from its command line; the workflow calls nightly.py.
   R2Rest        list the bucket and download one object through Cloudflare's
                 REST API, for the weekly snapshot the restore falls back to.
   run_checks    every night, that Cloudflare leaves the site's HTML as the
-                Worker sent it; on the first of a month also the expiry
-                dates of the tokens and the domain.
+                Worker sent it, and that the edge challenges a browser
+                without the check key and lets the run's own requests
+                through; on the first of a month also the expiry dates of
+                the tokens and the domain.
   attention_items, issue_texts
                 the items the run's last step reports, and the text of the
                 GitHub issue it opens, updates or closes.
@@ -25,7 +27,9 @@ nightly.py calls these from its command line; the workflow calls nightly.py.
 Every function here returns its finding rather than raising: a fault in this
 layer must never stop a night that would otherwise have worked. Tokens travel
 only in Authorization headers and are scrubbed from any message, so no log
-line, file or issue can carry one.
+line, file or issue can carry one. The edge check key travels only in its
+own header to the site's host (config.edge_check_headers) and is never
+recorded anywhere.
 """
 
 from __future__ import annotations
@@ -38,7 +42,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlencode, urljoin, urlsplit
 
 from . import config
 
@@ -87,6 +91,36 @@ def _api_codes(resp: Any) -> set[int]:
         return {int(e.get("code")) for e in resp.json().get("errors") or [] if isinstance(e, dict)}
     except Exception:
         return set()
+
+
+def _headers(resp: Any) -> dict[str, str]:
+    try:
+        return {str(k).lower(): str(v) for k, v in (getattr(resp, "headers", None) or {}).items()}
+    except Exception:
+        return {}
+
+
+REDIRECTS = (301, 302, 303, 307, 308)
+MAX_REDIRECTS = 5
+
+
+def site_get(http: Any, url: str, headers: Mapping[str, str], timeout: float, *, site_url: str,
+             env: Mapping[str, str] | None = None) -> Any:
+    """GET a URL of the live site, with the edge check key when it is set.
+
+    Redirects are followed here, not by the session: requests keeps every
+    header but Authorization when a redirect leads to another host, so the
+    key would go with it. Each hop carries the key only when its own address
+    is on the site's host. Raises what the session raises."""
+    resp = None
+    for _ in range(MAX_REDIRECTS + 1):
+        resp = http.get(url, headers={**headers, **config.edge_check_headers(url, site_url, env)},
+                        timeout=timeout, allow_redirects=False)
+        location = _headers(resp).get("location")
+        if _status_code(resp) not in REDIRECTS or not location:
+            return resp
+        url = urljoin(url, location)
+    return resp
 
 
 # -- gate ---------------------------------------------------------------------
@@ -249,10 +283,12 @@ def judge_answer(path: str, status: int, body: str, challenge: bool, data_date: 
     return Attempt(status, "ok", f"{path}: 200")
 
 
-def fetch(http: Any, base_url: str, path: str, data_date: str | None, timeout: float = SMOKE_TIMEOUT_S) -> Attempt:
+def fetch(http: Any, base_url: str, path: str, data_date: str | None, timeout: float = SMOKE_TIMEOUT_S,
+          env: Mapping[str, str] | None = None) -> Attempt:
     url = base_url.rstrip("/") + path
     try:
-        resp = http.get(url, headers={"User-Agent": config.USER_AGENT, "Cache-Control": "no-cache"}, timeout=timeout)
+        resp = site_get(http, url, {"User-Agent": config.USER_AGENT, "Cache-Control": "no-cache"}, timeout,
+                        site_url=base_url, env=env)
     except Exception as exc:
         return Attempt(0, "other", f"{path}: no answer ({type(exc).__name__})")
     status = _status_code(resp)
@@ -293,18 +329,20 @@ def judge(results: list[PageResult]) -> tuple[str, str]:
 
 def smoke(http: Any, base_url: str, data_date: str | None, paths: list[str], *,
           sleep: Callable[[float], None] = time.sleep, settle: float = SMOKE_SETTLE_S,
-          retry_after: float = SMOKE_RETRY_S) -> dict[str, Any]:
+          retry_after: float = SMOKE_RETRY_S, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Fetch every page, then once more after retry_after seconds each page
-    whose first answer was not ok, and judge. Never raises."""
+    whose first answer was not ok, and judge. Every request carries the edge
+    check key from env (else the environment) when it is set, since the edge
+    challenges a request without it. Never raises."""
     try:
         if settle:
             sleep(settle)
-        results = [PageResult(p, [fetch(http, base_url, p, data_date)]) for p in paths]
+        results = [PageResult(p, [fetch(http, base_url, p, data_date, env=env)]) for p in paths]
         again = [r for r in results if r.final.kind != "ok"]
         if again:
             sleep(retry_after)
             for r in again:
-                r.attempts.append(fetch(http, base_url, r.path, data_date))
+                r.attempts.append(fetch(http, base_url, r.path, data_date, env=env))
         verdict, detail = judge(results)
         pages = [r.as_dict() for r in results]
     except Exception as exc:
@@ -347,9 +385,11 @@ def _archive_file(bundle: Path, rel: str) -> tuple[bytes | None, str]:
         return None, f"{rel}: the archive's copy could not be read ({type(exc).__name__})"
 
 
-def _fetch_bytes(http: Any, url: str, timeout: float) -> tuple[bytes | None, str]:
+def _fetch_bytes(http: Any, url: str, timeout: float, site_url: str,
+                 env: Mapping[str, str] | None = None) -> tuple[bytes | None, str]:
     try:
-        resp = http.get(url, headers={"User-Agent": config.USER_AGENT, "Cache-Control": "no-cache"}, timeout=timeout)
+        resp = site_get(http, url, {"User-Agent": config.USER_AGENT, "Cache-Control": "no-cache"}, timeout,
+                        site_url=site_url, env=env)
     except Exception as exc:
         return None, f"no answer ({type(exc).__name__})"
     status = _status_code(resp)
@@ -380,11 +420,13 @@ def _compare(rel: str, against: str, archive: bytes, other: bytes | None, why: s
 
 def bundle_check(http: Any, base_url: str, bundle: Path, saved_stats: Path | None = None, *,
                  sleep: Callable[[float], None] = time.sleep, retry_after: float = BUNDLE_RETRY_S,
-                 timeout: float = SMOKE_TIMEOUT_S) -> tuple[dict[str, Any], bytes | None]:
+                 timeout: float = SMOKE_TIMEOUT_S,
+                 env: Mapping[str, str] | None = None) -> tuple[dict[str, Any], bytes | None]:
     """Compare the unpacked archive's BUNDLE_FILES with the ones the live site
     serves under /data/, as parsed JSON, and, when saved_stats is given, the
     archive's stats.json with that file as well. A file the site does not
-    answer 200 for is fetched once more after retry_after seconds.
+    answer 200 for is fetched once more after retry_after seconds. The
+    requests carry the edge check key as the smoke test's do.
 
     Returns (record, live stats.json bytes). record["ok"] is true only when
     every comparison found the same value; a file missing from the archive,
@@ -400,10 +442,10 @@ def bundle_check(http: Any, base_url: str, bundle: Path, saved_stats: Path | Non
             if archive is None:
                 files.append({"file": rel, "against": url, "result": "missing", "note": note})
                 continue
-            body, why = _fetch_bytes(http, url, timeout)
+            body, why = _fetch_bytes(http, url, timeout, base_url, env)
             if body is None:
                 sleep(retry_after)
-                body, why = _fetch_bytes(http, url, timeout)
+                body, why = _fetch_bytes(http, url, timeout, base_url, env)
             if rel == "stats.json":
                 live_stats = body
             files.append(_compare(rel, url, archive, body, why))
@@ -712,40 +754,42 @@ def domain_of(site_url: str) -> str:
 # Obfuscation, Automatic HTTPS Rewrites or Replace insecure JavaScript turned
 # on, shows here as a home page without its ETag or with a second beacon. The
 # request looks like a browser's (an Accept naming text/html), because the
-# edge rewrites only those.
+# edge rewrites only those, and carries the edge check key, because the edge
+# challenges a browser it cannot vouch for.
 HTML_CHECK_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 HTML_CHECK_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/130.0.0.0 Safari/537.36")
+HTML_CHECK_HEADERS = {"Accept": HTML_CHECK_ACCEPT, "User-Agent": HTML_CHECK_AGENT, "Accept-Encoding": "gzip"}
 BEACON_MARK = "data-cf-beacon"
 REWRITE_ITEM_START = "Cloudflare is rewriting the site's HTML again"
 
 
-def check_html_rewrite(http: Any, site_url: str, now: datetime) -> dict[str, Any]:
+def _text(resp: Any) -> str:
+    try:
+        return str(resp.text)[:MAX_BODY]
+    except Exception:
+        return ""
+
+
+def check_html_rewrite(http: Any, site_url: str, now: datetime, env: Mapping[str, str] | None = None) -> dict[str, Any]:
     """The home page as a browser receives it. "ok": 200 with an ETag and
     exactly one Web Analytics beacon. "rewritten", with an item: the ETag is
     gone or the beacon appears more than once. "unknown", no item: any other
     answer, a challenge, or no answer (an unreachable site is the smoke test's
-    to report). Never raises."""
+    to report, a challenge the edge check's). Never raises."""
     host = domain_of(site_url)
     if not host:
         return {"state": "unknown", "detail": "no site address configured"}
     out: dict[str, Any] = {"checked_at": now.isoformat(timespec="seconds")}
     url = site_url.rstrip("/") + "/"
     try:
-        resp = http.get(url, headers={"Accept": HTML_CHECK_ACCEPT, "User-Agent": HTML_CHECK_AGENT,
-                                      "Accept-Encoding": "gzip"}, timeout=CHECK_TIMEOUT_S)
+        resp = site_get(http, url, HTML_CHECK_HEADERS, CHECK_TIMEOUT_S, site_url=site_url, env=env)
     except Exception as exc:
         out.update(state="unknown", detail=f"request failed ({type(exc).__name__})")
         return out
     status = _status_code(resp)
-    try:
-        headers = {str(k).lower(): str(v) for k, v in (getattr(resp, "headers", None) or {}).items()}
-    except Exception:
-        headers = {}
-    try:
-        body = str(resp.text)[:MAX_BODY]
-    except Exception:
-        body = ""
+    headers = _headers(resp)
+    body = _text(resp)
     out.update(status=status, etag="etag" in headers, beacons=body.count(BEACON_MARK),
                content_encoding=headers.get("content-encoding"))
     if status != 200:
@@ -772,16 +816,98 @@ def check_html_rewrite(http: Any, site_url: str, now: datetime) -> dict[str, Any
     return out
 
 
+# The zone's WAF custom rules (pipeline/scripts/edge_rules.py) end with a
+# managed challenge for every request they cannot vouch for, which is what
+# keeps the scrapers off the pages; the run's own requests pass it with the
+# check key. Two requests for the home page show both halves hold: one as a
+# browser without the key, which the edge must challenge or block, and one
+# with it, which must get the page.
+#
+# The challenge rule goes on once this check is live, so before this date
+# (UTC) a page served without the key is the expected answer, not an item.
+EDGE_GATE_SINCE = date(2026, 11, 26)
+EDGE_ITEMS = {
+    "open": ("The edge challenge is off: a browser-like request without the check key got the page, so scrapers "
+             "are being served. Apply the WAF rules again (python pipeline/scripts/edge_rules.py --apply, "
+             "docs/traffic-limits.md) and look at Security, WAF, Custom rules in the dashboard."),
+    "key refused": ("The edge refused the run's check key: the secret EDGE_CHECK_KEY and the WAF rule differ, so the "
+                    "smoke test and the HTML check cannot read the site. Compare them with python "
+                    "pipeline/scripts/edge_rules.py --check and apply the rules with the key in the secret."),
+    "no key": ("EDGE_CHECK_KEY is not set for the run, so its checks of the live site are challenged at the edge. "
+               "Set the repository secret to the key in the WAF rule (docs/traffic-limits.md)."),
+}
+
+
+def _edge_answer(http: Any, url: str, site_url: str,
+                 env: Mapping[str, str] | None) -> tuple[int | None, bool, str]:
+    """(status, refused at the edge, detail) for one request for the home
+    page; status None when no answer came. A challenge (cf-mitigated or the
+    challenge page) and a 403 both count as refused: the Worker answers a
+    browser's request for the home page with neither."""
+    try:
+        resp = site_get(http, url, HTML_CHECK_HEADERS, CHECK_TIMEOUT_S, site_url=site_url, env=env)
+    except Exception as exc:
+        return None, False, f"request failed ({type(exc).__name__})"
+    status = _status_code(resp)
+    return status, _challenge(resp, _text(resp)) or status == 403, f"HTTP {status}"
+
+
+def check_edge_gate(http: Any, site_url: str, now: datetime, env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """The edge's gate, from outside. "ok": a browser without the key is
+    challenged or blocked and the run's key gets a 200. "open", with an item
+    from EDGE_GATE_SINCE on: the request without the key got the page.
+    "key refused", with an item: the key was challenged or blocked. "no
+    key", with an item: the gate stands and the run has no well-formed key.
+    "unknown", no item: no answer, or any other status. The record holds the
+    two statuses (keyed_status null when no request was made with the key)
+    and challenged (whether the edge refused the request without the key,
+    null when it got no answer), never the key. Never raises."""
+    if not domain_of(site_url):
+        return {"state": "unknown", "detail": "no site address configured"}
+    out: dict[str, Any] = {"checked_at": now.isoformat(timespec="seconds"), "status": None,
+                           "challenged": None, "keyed_status": None}
+    url = site_url.rstrip("/") + "/"
+    # An empty environment: this request must never carry the key.
+    status, refused, detail = _edge_answer(http, url, site_url, {})
+    out["status"] = status
+    if status is not None:
+        out["challenged"] = refused
+    keyed = None
+    if config.edge_check_key(env) is not None:
+        keyed = _edge_answer(http, url, site_url, env)
+        out["keyed_status"] = keyed[0]
+    if status is None:
+        out.update(state="unknown", detail=f"without the key: {detail}")
+    elif not refused and status == 200:
+        out["state"] = "open"
+        if now.astimezone(timezone.utc).date() < EDGE_GATE_SINCE:
+            out["detail"] = f"no item before {EDGE_GATE_SINCE}, when the challenge rule goes on"
+        else:
+            out["item"] = EDGE_ITEMS["open"]
+    elif not refused:
+        out.update(state="unknown", detail=f"without the key: {detail}")
+    elif keyed is None:
+        out.update(state="no key", item=EDGE_ITEMS["no key"])
+    elif keyed[1]:
+        out.update(state="key refused", item=EDGE_ITEMS["key refused"])
+    elif keyed[0] == 200:
+        out["state"] = "ok"
+    else:
+        out.update(state="unknown", detail=f"with the key: {keyed[2]}")
+    return out
+
+
 def run_checks(today: date, env: Mapping[str, str], http: Any, *, domain: str, site_url: str = "",
                now: datetime | None = None) -> dict[str, Any]:
-    """Tonight's checks: the HTML check every night and, on the first of a
-    month (monthly: true), the expiry checks of the two tokens and the
-    domain. Never raises."""
+    """Tonight's checks: the HTML check and the edge check every night and,
+    on the first of a month (monthly: true), the expiry checks of the two
+    tokens and the domain. Never raises."""
     current = now or datetime.now(timezone.utc)
     monthly = checks_due(today)
     out: dict[str, Any] = {"due": True, "monthly": monthly, "date": today.isoformat()}
     jobs: list[tuple[str, Callable[[], dict[str, Any]]]] = [
-        ("html_rewrite", lambda: check_html_rewrite(http, site_url, current)),
+        ("html_rewrite", lambda: check_html_rewrite(http, site_url, current, env)),
+        ("edge_gate", lambda: check_edge_gate(http, site_url, current, env)),
     ]
     if monthly:
         deploy = (env.get("CLOUDFLARE_API_TOKEN") or "").strip()
@@ -809,6 +935,9 @@ def run_checks(today: date, env: Mapping[str, str], http: Any, *, domain: str, s
 
 ISSUE_TITLE = "Nightly run needs attention"
 ISSUE_LABEL = "run-attention"
+# How the items of the checks that run every night begin. They are listed as
+# they are; any other item under checks is an expiry check's.
+NIGHTLY_ITEM_STARTS = (REWRITE_ITEM_START, *EDGE_ITEMS.values())
 
 
 def attention_items(status: Any) -> list[str]:
@@ -861,8 +990,8 @@ def attention_items(status: Any) -> list[str]:
                      f"so the Job Bank observations since that snapshot are lost")
     checks = status.get("checks")
     if isinstance(checks, dict):
-        # The HTML check's item names itself; the others come from the monthly expiry checks.
-        items.extend(i if i.startswith(REWRITE_ITEM_START) else f"Expiry check: {i}"
+        # The nightly checks' items name themselves; the others come from the monthly expiry checks.
+        items.extend(i if i.startswith(NIGHTLY_ITEM_STARTS) else f"Expiry check: {i}"
                      for i in checks.get("items") or [] if isinstance(i, str))
     # A designated-employer list loaded by hand whose publisher has a newer
     # edition: someone has to load it by hand, so it is an item, not a notice.

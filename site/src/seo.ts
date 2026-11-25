@@ -431,10 +431,13 @@ export function profileDescription(profile: Profile, lang: Lang): string {
   return room >= 20 ? clip(e.display_name, room) + short : clip(e.display_name + short, DESCRIPTION_MAX);
 }
 
+// The title is the one the layout would write from the page's heading, set
+// here so the head given to a link preview (preview.ts) reads the same.
 export function profileSeo(profile: Profile, lang: Lang): Seo {
   const e = profile.employer;
   return {
     path: `/employers/${e.id}`,
+    title: pageTitle(e.display_name),
     description: profileDescription(profile, lang),
     socialTitle: e.display_name,
     image: SOCIAL_SQUARE,

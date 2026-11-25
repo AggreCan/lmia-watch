@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "deploy-site.yml"
 NIGHTLY = ROOT / ".github" / "workflows" / "nightly.yml"
 BASE = "https://lmiawatch.example"
+# A made-up edge check key of the right form.
+KEY = "c0ffee" + "fedcba9876543210" * 3 + "beefcafe00"
 
 STATS = {"data_as_of": "2026-10-22", "counts": {"employers": 166497}, "top_approvals": [{"employer_id": "emp-a000000005"}]}
 FACETS = {"province": {"BC": 10, "ON": 12}, "status": {"approved": 20, "pending": 2}}
@@ -212,7 +214,10 @@ def test_site_bundle_check_command(tmp_path, monkeypatch, caplog):
 
 # -- the workflow guard ----------------------------------------------------------
 
-ALLOWED_SECRETS = {"CLOUDFLARE_SITE_DEPLOY_TOKEN", "CLOUDFLARE_ACCOUNT_ID"}
+# EDGE_CHECK_KEY writes nothing anywhere: it only lets the checks of the live
+# site past the edge's challenge.
+ALLOWED_SECRETS = {"CLOUDFLARE_SITE_DEPLOY_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "EDGE_CHECK_KEY"}
+KEY_LINE = "EDGE_CHECK_KEY: ${{ secrets.EDGE_CHECK_KEY }}"
 ALLOWED_ACTIONS = {"actions/checkout@v4", "actions/setup-python@v5", "actions/setup-node@v4"}
 TOKEN_LINE = "CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_SITE_DEPLOY_TOKEN }}"
 WRANGLER_ENV = "WRANGLER: ${{ github.workspace }}/site/node_modules/.bin/wrangler"
@@ -325,6 +330,18 @@ def workflow_problems(text, nightly_text=None):
         for sub in re.findall(r"lmia_pipeline\.nightly\s+(\S+)", line):
             if sub not in ALLOWED_NIGHTLY:
                 problems.append(f"nightly command {sub} is not allowed")
+        if "EDGE_CHECK_KEY" in line and line.strip() != KEY_LINE:
+            problems.append(f"EDGE_CHECK_KEY may only be set from its secret: {line.strip()}")
+    # The check key goes to the steps that fetch the live site and to no other.
+    head, _, body = text.partition("\n    steps:\n")
+    if any("EDGE_CHECK_KEY" in line for line in code_lines(head)):
+        problems.append("EDGE_CHECK_KEY must not be in the job's environment")
+    for step in re.split(r"\n      - ", body):
+        code = "\n".join(code_lines(step))
+        reads_site = re.search(r"lmia_pipeline\.nightly (smoke|site-bundle-check)\s", code) is not None
+        if ("EDGE_CHECK_KEY" in code) != reads_site:
+            problems.append("the check key must reach exactly the steps that fetch the live site: "
+                            + (step.splitlines() or [""])[0])
     if sum(1 for line in lines if line.strip() == WRANGLER_ENV) != 1:
         problems.append("WRANGLER must be defined once, as the site's pinned binary")
     if [line.strip() for line in lines if line.strip().startswith("BUCKET:")] != ["BUCKET: lmia-watch-data"]:
@@ -358,6 +375,47 @@ def test_the_deploy_token_reaches_only_the_steps_that_call_wrangler():
     assert "CLOUDFLARE_API_TOKEN" not in job_env
 
 
+def test_the_check_key_reaches_only_the_steps_that_read_the_live_site():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    steps = re.split(r"\n      - ", text.split("\n    steps:\n", 1)[1])
+    readers = 0
+    for step in steps:
+        code = "\n".join(code_lines(step))
+        reads_site = re.search(r"lmia_pipeline\.nightly (smoke|site-bundle-check)\s", code) is not None
+        readers += reads_site
+        assert (KEY_LINE in code) == reads_site, step.splitlines()[0]
+    assert readers == 4
+    assert sum(1 for line in code_lines(text) if "EDGE_CHECK_KEY" in line) == 4
+    assert all(line.strip() == KEY_LINE for line in code_lines(text) if "EDGE_CHECK_KEY" in line)
+
+
+def test_the_bundle_check_sends_the_check_key_to_the_site_only(tmp_path):
+    bundle = make_bundle(tmp_path / "static")
+    http = live()
+    record, _ = resilience.bundle_check(http, BASE, bundle, sleep=lambda s: None, env={"EDGE_CHECK_KEY": KEY})
+    assert record["ok"] is True and len(http.calls) == 3
+    assert all(h["x-lmiawatch-check"] == KEY for _, h in http.calls)
+    assert KEY not in json.dumps(record)
+    # Without the key, or with one that is not 64 lower-case hex characters, nothing is sent.
+    for env in ({}, {"EDGE_CHECK_KEY": KEY.upper()}):
+        http = live()
+        resilience.bundle_check(http, BASE, bundle, sleep=lambda s: None, env=env)
+        assert all("x-lmiawatch-check" not in h for _, h in http.calls)
+
+
+def test_site_bundle_check_command_never_prints_the_key(tmp_path, monkeypatch, caplog, capsys):
+    bundle = make_bundle(tmp_path / "static")
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("EDGE_CHECK_KEY", KEY)
+    http = live(**{"search__facets.json": body({"province": {}})})
+    monkeypatch.setattr(nightly, "_session", lambda: http)
+    assert nightly.main(["site-bundle-check", "--bundle", str(bundle), "--base-url", BASE, "--retry-after", "0"]) == 1
+    assert all(h["x-lmiawatch-check"] == KEY for _, h in http.calls)
+    for text in (caplog.text, capsys.readouterr().out, summary.read_text(encoding="utf-8")):
+        assert KEY not in text
+
+
 def test_the_workflow_text_has_no_em_dashes():
     assert "\u2014" not in WORKFLOW.read_text(encoding="utf-8")
 
@@ -384,6 +442,12 @@ PLANTED = [
     ("a direct API call", "          test -s \"$WORK/stats.before.json\"",
      "          curl -X PUT https://api.cloudflare.com/client/v4/accounts/x/r2/buckets/lmia-watch-data/objects/x"),
     ("another secret", "REASON: ${{ inputs.reason }}", "REASON: ${{ secrets.ZENODO_TOKEN }}"),
+    ("the check key on a step that does not read the site", "        working-directory: site\n        run: npm ci",
+     "        working-directory: site\n        env:\n          EDGE_CHECK_KEY: ${{ secrets.EDGE_CHECK_KEY }}\n        run: npm ci"),
+    ("the check key in the job's environment", "      BUCKET: lmia-watch-data\n",
+     "      BUCKET: lmia-watch-data\n      EDGE_CHECK_KEY: ${{ secrets.EDGE_CHECK_KEY }}\n"),
+    ("the check key from somewhere else", "          EDGE_CHECK_KEY: ${{ secrets.EDGE_CHECK_KEY }}",
+     "          EDGE_CHECK_KEY: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}"),
     ("another action", "      - uses: actions/checkout@v4", "      - uses: ./.github/workflows/nightly.yml"),
 ]
 

@@ -37,7 +37,9 @@
     // requests a minute for each crawler at each Cloudflare location, at most
     // 14,400 a day there. Every request past it still runs the Worker for the
     // 429, so this bounds the work and tells the crawler to slow;
-    // public/robots.txt asks the same of those that read it.
+    // public/robots.txt asks the same of those that read it. A link-preview
+    // fetcher Cloudflare has not verified has the same budget for pages under
+    // its own name (src/limits.ts previewRequest).
     { "name": "CRAWLER_LIMIT", "namespace_id": "1006", "simple": { "limit": 10, "period": 60 } }
   ],
   // The daily check (src/watchdog.ts): 06:00 UTC, after the nightly run has had

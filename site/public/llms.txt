@@ -6,6 +6,10 @@
 > Updated nightly from Employment and Social Development Canada and Job Bank.
 > In English and French (?lang=fr). https://lmiawatch.ca
 
+The pages are served to browsers after an automatic check and to crawlers
+Cloudflare has verified. A script or an unverified crawler is refused on the
+pages and should read the bulk files listed here, which are open to any client.
+
 ## Bulk data: read these instead of crawling 160,000 profile pages
 
 Everything the profile pages show is in these files, refreshed every night.
